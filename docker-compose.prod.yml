@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  twindeploy:
+    build: .
+    ports:
+      - "9547:9547"
+    environment:
+      - NODE_ENV=production
+    # Production mode - no automatic mounts for security
+    # Users must explicitly mount what they need:
+    # docker-compose -f docker-compose.prod.yml up -d
+    # volumes:
+    #   - ./path/to/specific/repo:/host/repo:ro

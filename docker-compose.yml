@@ -5,9 +5,17 @@ services:
     ports:
       - "9547:9547"
     environment:
-      - NODE_ENV=production
-    # Uncomment and set these if needed
-    # env_file:
-    #   - backend/.env
+      - NODE_ENV=development
+    volumes:
+      # Auto-mount common development directories
+      - ${HOME}/Documents:/host/Documents:ro
+      - ${HOME}/Projects:/host/Projects:ro
+      - ${HOME}/Desktop:/host/Desktop:ro
+      - ${HOME}/Downloads:/host/Downloads:ro
+      - /Volumes:/host/Volumes:ro  # For external drives on macOS
+      # Mount Git global config for authentication
+      - ${HOME}/.gitconfig:/root/.gitconfig:ro
+      - ${HOME}/.ssh:/root/.ssh:ro
+    # Uncomment for live development
     # volumes:
     #   - ./backend:/app/backend

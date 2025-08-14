@@ -77,7 +77,46 @@ docker-compose logs -f
 # Stop the application
 docker-compose down
 
-# Open http://localhost:5173 in your browser
+#### Using Docker Compose (Development Mode - Recommended)
+
+```bash
+# 1) Clone the repository
+git clone git@github.com:ShirleyKyeyune/TwinDeploy.git
+cd TwinDeploy
+
+# 2) Start in development mode (auto-mounts common directories)
+./scripts/dev-start.sh
+# OR manually:
+docker-compose up -d
+
+# Access your app at http://localhost:9547
+# Your repositories are available under /host/ paths:
+# - /host/Documents/your-repo
+# - /host/Projects/your-repo
+# - /host/Desktop/your-repo
+# - /host/Downloads/your-repo
+# - /host/Volumes/your-repo
+
+# View logs
+docker-compose logs -f
+
+# Stop
+docker-compose down
+```
+
+#### Using Docker Compose (Production Mode - Secure)
+
+```bash
+# 1) Clone and build
+git clone git@github.com:ShirleyKyeyune/TwinDeploy.git
+cd TwinDeploy
+
+# 2) Start in production mode with specific repositories
+./scripts/prod-start.sh /path/to/repo1 /path/to/repo2
+# OR manually with docker-compose:
+docker-compose -f docker-compose.prod.yml up -d
+
+# Access at http://localhost:9547
 ```
 
 #### Using Docker CLI (Manual)
@@ -90,10 +129,21 @@ cd TwinDeploy
 # 2) Build the Docker image
 docker build -t twindeploy .
 
-# 3) Run the container in detached mode
-docker run -d --name twindeploy -p 9547:9547 twindeploy
+# 3) Run with auto-mounted directories (Development)
+docker run -d --name twindeploy -p 9547:9547 \
+  -v $HOME/Documents:/host/Documents:ro \
+  -v $HOME/Projects:/host/Projects:ro \
+  -v $HOME/Desktop:/host/Desktop:ro \
+  -v $HOME/.gitconfig:/root/.gitconfig:ro \
+  -v $HOME/.ssh:/root/.ssh:ro \
+  twindeploy
 
-# View logs (optional)
+# OR run with specific repository (Production)
+docker run -d --name twindeploy -p 9547:9547 \
+  -v /path/to/your/repo:/host/repo1:ro \
+  twindeploy
+
+# View logs
 docker logs -f twindeploy
 
 # Stop and remove the container

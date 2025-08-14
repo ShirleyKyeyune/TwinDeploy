@@ -17,13 +17,20 @@ COPY backend ./backend
 FROM node:18-alpine
 WORKDIR /app
 
+# Install git for repository operations
+RUN apk add --no-cache git
+
 # Copy backend
 COPY --from=build-backend /app/backend ./backend
 # Copy frontend build files
 COPY --from=build-frontend /app/frontend/dist ./frontend/dist
 
+# Copy startup script
+COPY scripts/start.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh
+
 # Expose ports for backend and frontend (optional)
 EXPOSE 9547
 
-# Start backend only, frontend is static
-CMD ["node", "backend/index.js"]
+# Use startup script instead of direct node command
+CMD ["/usr/local/bin/start.sh"]
