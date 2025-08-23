@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
-import { getChanged, getStaged, listTargets, addTarget, updateTarget, deleteTarget, startDeploy, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile } from './api';
+import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, startDeploy, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile } from './api';
 
 // Helper to read SSE from a fetch Response (Safari-friendly)
 class EventSourcePoly {
@@ -41,8 +41,11 @@ function formatFileSize(bytes) {
 export default function App(){
   const version = "1.0.0"; // TwinDeploy version
   const [repoPath,setRepoPath] = useState('');
-  const [mode,setMode] = useState('staged'); // 'changed' | 'staged'
+  const [mode,setMode] = useState('staged'); // 'changed' | 'staged' | 'committed'
   const [baseRef,setBaseRef] = useState('HEAD~1');
+  const [baseBranch,setBaseBranch] = useState('main'); // For committed changes mode
+  const [availableBranches,setAvailableBranches] = useState([]);
+  const [currentBranch,setCurrentBranch] = useState('');
   const [diff,setDiff] = useState([]);
   const [sel,setSel] = useState({});
   const [targets,setTargets] = useState([]);
@@ -73,12 +76,69 @@ export default function App(){
 
   useEffect(()=>{ document.body.classList.toggle('dark', dark); },[dark]);
   useEffect(()=>{ listTargets().then(setTargets); },[]);
+  useEffect(()=>{ loadBranches(); },[repoPath]);
 
-  const selectedFiles = useMemo(()=> Object.keys(sel).filter(k=>sel[k]),[sel]);
+  const selectedFiles = useMemo(()=> {
+    const selectedPaths = Object.keys(sel).filter(k=>sel[k]);
+    const result = [];
+
+    selectedPaths.forEach(path => {
+      const fileInfo = diff.find(f => f.path === path);
+      if (!fileInfo) {
+        // Fallback for backward compatibility
+        result.push({ path, action: 'upload' });
+        return;
+      }
+
+      if (fileInfo.status === 'renamed' && fileInfo.oldPath) {
+        // For renamed files, show both delete and upload operations
+        result.push({
+          path: fileInfo.oldPath,
+          action: 'delete',
+          status: 'deleted',
+          isRenameOperation: true,
+          renameTo: fileInfo.path
+        });
+        result.push({
+          path: fileInfo.path,
+          action: 'upload',
+          status: 'added',
+          isRenameOperation: true,
+          renameFrom: fileInfo.oldPath
+        });
+      } else {
+        result.push(fileInfo);
+      }
+    });
+
+    return result;
+  },[sel, diff]);
+
+  async function loadBranches(){
+    if(!repoPath) return;
+    try {
+      const res = await getBranches(repoPath);
+      setAvailableBranches(res.baseBranches || []);
+      setCurrentBranch(res.currentBranch || '');
+      // Set default base branch if none selected
+      if(!baseBranch && res.baseBranches.length > 0) {
+        setBaseBranch(res.baseBranches[0]);
+      }
+    } catch (e) {
+      console.error('Failed to load branches:', e);
+    }
+  }
 
   async function scan(){
     setDiff([]); setSel({});
-    const res = mode==='changed' ? await getChanged(repoPath, baseRef) : await getStaged(repoPath);
+    let res;
+    if (mode === 'changed') {
+      res = await getChanged(repoPath, baseRef);
+    } else if (mode === 'committed') {
+      res = await getCommitted(repoPath, baseBranch);
+    } else {
+      res = await getStaged(repoPath);
+    }
     const items = res.items||[]; setDiff(items);
   }
 
@@ -361,11 +421,11 @@ export default function App(){
       setLog(l=>[...l, `Start: ${d.total} files → ${d.target} (${deploymentRoot})`]);
     });
     es.on('progress', d=> {
-      setLog(l=>[...l, `Uploaded ${d.index}/${d.total}: ${d.file}`]);
+      setLog(l=>[...l, `${d.action || 'Uploaded'} ${d.index}/${d.total}: ${d.file}`]);
       setDeploymentProgress(prev => ({
         ...prev,
         completed: [...prev.completed, d.file],
-        current: d.index < d.total ? selectedFiles[d.index] : null
+        current: d.index < d.total ? (selectedFiles[d.index]?.path || selectedFiles[d.index]) : null
       }));
     });
     es.on('error', d=> {
@@ -558,11 +618,25 @@ export default function App(){
           </div>
           <div className="row tight">
             <label className="radio"><input type="radio" checked={mode==='changed'} onChange={()=>setMode('changed')} /> Changed since</label>
-            <input value={baseRef} onChange={e=>setBaseRef(e.target.value)} style={{width:140}} />
+            <input value={baseRef} onChange={e=>setBaseRef(e.target.value)} style={{width:140}} disabled={mode!=='changed'} />
             <label className="radio"><input type="radio" checked={mode==='staged'} onChange={()=>setMode('staged')} /> Staged</label>
+            <label className="radio"><input type="radio" checked={mode==='committed'} onChange={()=>setMode('committed')} /> Committed vs</label>
+            <select value={baseBranch} onChange={e=>setBaseBranch(e.target.value)} style={{width:140}} disabled={mode!=='committed'}>
+              {availableBranches.map(branch => (
+                <option key={branch} value={branch}>{branch}</option>
+              ))}
+              {availableBranches.length === 0 && <option value="main">main</option>}
+            </select>
             <button className="btn primary" onClick={scan}>Scan</button>
           </div>
-          <div className="hint">{repoPath? 'Repo path set.' : 'Enter the absolute path to your Git repository.'}</div>
+          <div className="hint">
+            {mode === 'committed' && currentBranch ?
+              `On branch: ${currentBranch}. Comparing committed changes against ${baseBranch}.` :
+              mode === 'staged' ?
+                'Staged files ready for commit.' :
+                'Changed files since the specified reference.'
+            }
+          </div>
         </section>
 
         <section className="panel files-panel">
@@ -573,9 +647,29 @@ export default function App(){
           </div>
           <div className="list files">
             {diff.map(it=> (
-              <label key={it.path} className={`file-item ${sel[it.path]?'on':''}`}>
+              <label key={it.path} className={`file-item ${sel[it.path]?'on':''} ${it.status || ''}`}>
                 <input type="checkbox" checked={!!sel[it.path]} onChange={e=>setSel({...sel,[it.path]:e.target.checked})} />
-                <span className="mono">{it.path}</span>
+                <span className="file-info">
+                  <span className="mono file-path">{it.path}</span>
+                  {it.status && (
+                    <span className={`status-badge ${it.status}`}>
+                      {it.status === 'renamed' && it.oldPath ? `${it.status} from ${it.oldPath}` : it.status}
+                    </span>
+                  )}
+                  {it.action && (
+                    <span className={`action-badge ${it.action}`}>
+                      {it.action === 'delete' ? '🗑️' :
+                       it.action === 'rename' ? '📝🗑️📤' :
+                       it.action === 'upload' ? '📤' : ''}
+                    </span>
+                  )}
+                  {it.status === 'renamed' && it.oldPath && (
+                    <div className="rename-operations">
+                      <span className="rename-op delete">🗑️ Delete: {it.oldPath}</span>
+                      <span className="rename-op upload">📤 Upload: {it.path}</span>
+                    </div>
+                  )}
+                </span>
               </label>
             ))}
             {diff.length===0 && <div className="empty">No results. Scan first.</div>}
@@ -608,7 +702,8 @@ export default function App(){
                     <div></div>
                     <div>Destination Path</div>
                   </div>
-                  {selectedFiles.map(path => {
+                  {selectedFiles.map(fileInfo => {
+                    const path = fileInfo.path || fileInfo; // backward compatibility
                     const selectedTarget = targets.find(t => t.id === targetId);
                     let destinationRoot = remotePath || '/';
                     if (!showRemoteBrowser && selectedTarget?.remoteRoot && selectedTarget.remoteRoot.trim()) {
@@ -625,16 +720,35 @@ export default function App(){
                     const isFailed = deploymentProgress.failed.includes(path);
                     const isCurrent = deploymentProgress.current === path;
 
+                    // Show action indicator
+                    const actionIcon = fileInfo.action === 'delete' ? '🗑️' : '📤';
+
+                    // Special handling for rename operations
+                    let displayText = path;
+                    let destinationText = fileInfo.action === 'delete' ? '(will be deleted)' : fullDestPath;
+
+                    if (fileInfo.isRenameOperation) {
+                      if (fileInfo.action === 'delete') {
+                        displayText = `${path}`;
+                        destinationText = `(delete old file for rename to ${fileInfo.renameTo})`;
+                      } else if (fileInfo.action === 'upload') {
+                        displayText = `${path}`;
+                        destinationText = `${fullDestPath} (upload new file from rename of ${fileInfo.renameFrom})`;
+                      }
+                    }
+
                     return (
-                      <div key={path} className={`queue-item ${isCompleted ? 'completed' : ''} ${isFailed ? 'failed' : ''} ${isCurrent ? 'current' : ''}`}>
+                      <div key={`${path}-${fileInfo.action}`} className={`queue-item ${isCompleted ? 'completed' : ''} ${isFailed ? 'failed' : ''} ${isCurrent ? 'current' : ''}`}>
                         <div className="source-path mono" title={`${repoPath}/${path}`}>
-                          {path}
+                          {actionIcon} {displayText}
                           {isCompleted && <span className="status-icon">✅</span>}
                           {isFailed && <span className="status-icon">❌</span>}
                           {isCurrent && <span className="status-icon">⏳</span>}
                         </div>
                         <div className="arrow">→</div>
-                        <div className="dest-path mono" title={fullDestPath}>{fullDestPath}</div>
+                        <div className="dest-path mono" title={fullDestPath}>
+                          {destinationText}
+                        </div>
                       </div>
                     );
                   })}

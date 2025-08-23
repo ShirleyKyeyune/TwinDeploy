@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { v4 as uuid } from 'uuid';
-import { listChanged, listStaged, getRepoRoot } from './git.js';
+import { listChanged, listStaged, getRepoRoot, listCommittedChanges, getBaseBranches, getCurrentBranch } from './git.js';
 import { getTargets, saveTargets, addManifest, getManifests } from './store.js';
 import { uploadWithSFTP, uploadWithFTPS } from './deploy.js';
 import fs from 'fs/promises';
@@ -43,6 +43,21 @@ app.get('/api/repo/staged', async (req,res)=>{
     const { repoPath } = req.query;
     const items = await listStaged(repoPath);
     res.json({ items });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.get('/api/repo/committed', async (req,res)=>{
+  try {
+    const { repoPath, baseBranch='main' } = req.query;
+    const items = await listCommittedChanges(repoPath, baseBranch);
+    res.json({ items });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.get('/api/repo/branches', async (req,res)=>{
+  try {
+    const { repoPath } = req.query;
+    const baseBranches = await getBaseBranches(repoPath);
+    const currentBranch = await getCurrentBranch(repoPath);
+    res.json({ baseBranches, currentBranch });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

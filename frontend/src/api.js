@@ -6,6 +6,14 @@ export async function getStaged(repoPath){
   const r = await fetch(`/api/repo/staged?repoPath=${encodeURIComponent(repoPath)}`);
   return r.json();
 }
+export async function getCommitted(repoPath, baseBranch){
+  const r = await fetch(`/api/repo/committed?repoPath=${encodeURIComponent(repoPath)}&baseBranch=${encodeURIComponent(baseBranch||'main')}`);
+  return r.json();
+}
+export async function getBranches(repoPath){
+  const r = await fetch(`/api/repo/branches?repoPath=${encodeURIComponent(repoPath)}`);
+  return r.json();
+}
 export async function listTargets(){ const r=await fetch('/api/targets'); return r.json(); }
 export async function addTarget(t){ const r=await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(t)}); return r.json(); }
 export async function updateTarget(id,t){ const r=await fetch('/api/targets/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(t)}); return r.json(); }

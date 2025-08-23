@@ -287,6 +287,91 @@ body.dark .list { background:#0f172a; }
 .file-item:hover { background:rgba(0,0,0,0.05); }
 body.dark .file-item:hover { background:rgba(255,255,255,0.05); }
 .file-item:last-child { border-bottom:none; }
+
+.file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.file-path {
+  font-family: var(--mono);
+}
+
+.status-badge, .action-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.status-badge {
+  display: inline-block;
+  margin-left: 8px;
+}
+
+.status-badge.added { background: #dcfce7; color: #166534; }
+.status-badge.modified { background: #fef3c7; color: #92400e; }
+.status-badge.deleted { background: #fee2e2; color: #dc2626; }
+.status-badge.renamed { background: #e0e7ff; color: #3730a3; }
+.status-badge.copied { background: #f0f9ff; color: #0369a1; }
+.status-badge.type_changed { background: #fdf4ff; color: #86198f; }
+
+.action-badge {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 12px;
+}
+
+/* Dark mode overrides */
+body.dark .status-badge.added { background: #14532d; color: #bbf7d0; }
+body.dark .status-badge.modified { background: #451a03; color: #fde68a; }
+body.dark .status-badge.deleted { background: #7f1d1d; color: #fecaca; }
+body.dark .status-badge.renamed { background: #312e81; color: #c7d2fe; }
+body.dark .status-badge.copied { background: #0c4a6e; color: #bae6fd; }
+body.dark .status-badge.type_changed { background: #581c87; color: #f3e8ff; }
+
+.old-path {
+  font-size: 10px;
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.rename-operations {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  font-size: 10px;
+}
+
+.rename-op {
+  padding: 2px 4px;
+  border-radius: 2px;
+  font-family: var(--mono);
+}
+
+.rename-op.delete {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.rename-op.upload {
+  background: #dcfce7;
+  color: #166534;
+}
+
+/* Dark mode for rename operations */
+body.dark .rename-op.delete {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+body.dark .rename-op.upload {
+  background: #14532d;
+  color: #bbf7d0;
+}
 .mono { font-family:var(--mono); }
 
 .target-item, .manifest-item {
