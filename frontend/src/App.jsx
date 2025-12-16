@@ -1,29 +1,29 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
-import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, startDeploy, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile } from './api';
+import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, startDeploy, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile, browseDirectory } from './api';
 
 // Helper to read SSE from a fetch Response (Safari-friendly)
 class EventSourcePoly {
-  constructor(response){ this.response=response; this.listeners={}; this._pump(); }
-  on(e,cb){ (this.listeners[e]||(this.listeners[e]=[])).push(cb); }
-  close(){ this.controller?.abort(); }
-  async _pump(){
+  constructor(response) { this.response = response; this.listeners = {}; this._pump(); }
+  on(e, cb) { (this.listeners[e] || (this.listeners[e] = [])).push(cb); }
+  close() { this.controller?.abort(); }
+  async _pump() {
     const reader = this.response.body.getReader();
     const decoder = new TextDecoder();
-    let buf='';
-    while(true){
-      const {value,done} = await reader.read(); if(done) break;
-      buf += decoder.decode(value,{stream:true});
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += decoder.decode(value, { stream: true });
       let idx;
-      while((idx=buf.indexOf('\n\n'))>=0){
-        const chunk = buf.slice(0,idx); buf = buf.slice(idx+2);
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
         const lines = chunk.split('\n');
-        let ev='message', data='';
-        for(const L of lines){
-          if(L.startsWith('event:')) ev = L.slice(6).trim();
-          if(L.startsWith('data:')) data += L.slice(5).trim();
+        let ev = 'message', data = '';
+        for (const L of lines) {
+          if (L.startsWith('event:')) ev = L.slice(6).trim();
+          if (L.startsWith('data:')) data += L.slice(5).trim();
         }
-        try { data = JSON.parse(data); } catch {}
-        (this.listeners[ev]||[]).forEach(fn=>fn(data));
+        try { data = JSON.parse(data); } catch { }
+        (this.listeners[ev] || []).forEach(fn => fn(data));
       }
     }
   }
@@ -38,20 +38,24 @@ function formatFileSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-export default function App(){
+export default function App() {
   const version = "1.0.0"; // TwinDeploy version
-  const [repoPath,setRepoPath] = useState('');
-  const [mode,setMode] = useState('staged'); // 'changed' | 'staged' | 'committed'
-  const [baseRef,setBaseRef] = useState('HEAD~1');
-  const [baseBranch,setBaseBranch] = useState('main'); // For committed changes mode
-  const [availableBranches,setAvailableBranches] = useState([]);
-  const [currentBranch,setCurrentBranch] = useState('');
-  const [diff,setDiff] = useState([]);
-  const [sel,setSel] = useState({});
-  const [targets,setTargets] = useState([]);
-  const [targetId,setTargetId] = useState('');
-  const [log,setLog] = useState([]);
-  const [dark,setDark] = useState(false);
+  const [repoPath, setRepoPath] = useState('');
+  const [mode, setMode] = useState('staged'); // 'changed' | 'staged' | 'committed'
+  const [baseRef, setBaseRef] = useState('HEAD~1');
+  const [baseBranch, setBaseBranch] = useState('main'); // For committed changes mode
+  const [availableBranches, setAvailableBranches] = useState([]);
+  const [currentBranch, setCurrentBranch] = useState('');
+  const [diff, setDiff] = useState([]);
+  const [sel, setSel] = useState({});
+  const [targets, setTargets] = useState([]);
+  const [targetId, setTargetId] = useState('');
+  const [log, setLog] = useState([]);
+  const [dark, setDark] = useState(false);
+
+  // File view state
+  const [fileViewMode, setFileViewMode] = useState('list'); // 'list' | 'tree'
+  const [expandedFolders, setExpandedFolders] = useState({});
 
   // Remote browser state
   const [showRemoteBrowser, setShowRemoteBrowser] = useState(false);
@@ -74,12 +78,18 @@ export default function App(){
     failed: []
   });
 
-  useEffect(()=>{ document.body.classList.toggle('dark', dark); },[dark]);
-  useEffect(()=>{ listTargets().then(setTargets); },[]);
-  useEffect(()=>{ loadBranches(); },[repoPath]);
+  // Folder picker state
+  const [showFolderPicker, setShowFolderPicker] = useState(false);
+  const [folderPickerPath, setFolderPickerPath] = useState('');
+  const [folderPickerData, setFolderPickerData] = useState(null);
+  const [folderPickerLoading, setFolderPickerLoading] = useState(false);
 
-  const selectedFiles = useMemo(()=> {
-    const selectedPaths = Object.keys(sel).filter(k=>sel[k]);
+  useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
+  useEffect(() => { listTargets().then(setTargets); }, []);
+  useEffect(() => { loadBranches(); }, [repoPath]);
+
+  const selectedFiles = useMemo(() => {
+    const selectedPaths = Object.keys(sel).filter(k => sel[k]);
     const result = [];
 
     selectedPaths.forEach(path => {
@@ -112,16 +122,48 @@ export default function App(){
     });
 
     return result;
-  },[sel, diff]);
+  }, [sel, diff]);
 
-  async function loadBranches(){
-    if(!repoPath) return;
+  async function openFolderPicker() {
+    setShowFolderPicker(true);
+    setFolderPickerLoading(true);
+    try {
+      const data = await browseDirectory('');
+      setFolderPickerData(data);
+      setFolderPickerPath(data.currentPath);
+    } catch (e) {
+      alert('Failed to open folder picker: ' + e.message);
+    } finally {
+      setFolderPickerLoading(false);
+    }
+  }
+
+  async function navigateToFolder(path) {
+    setFolderPickerLoading(true);
+    try {
+      const data = await browseDirectory(path);
+      setFolderPickerData(data);
+      setFolderPickerPath(data.currentPath);
+    } catch (e) {
+      alert('Failed to browse folder: ' + e.message);
+    } finally {
+      setFolderPickerLoading(false);
+    }
+  }
+
+  function selectFolder(path) {
+    setRepoPath(path);
+    setShowFolderPicker(false);
+  }
+
+  async function loadBranches() {
+    if (!repoPath) return;
     try {
       const res = await getBranches(repoPath);
       setAvailableBranches(res.baseBranches || []);
       setCurrentBranch(res.currentBranch || '');
       // Set default base branch if none selected
-      if(!baseBranch && res.baseBranches.length > 0) {
+      if (!baseBranch && res.baseBranches.length > 0) {
         setBaseBranch(res.baseBranches[0]);
       }
     } catch (e) {
@@ -129,7 +171,7 @@ export default function App(){
     }
   }
 
-  async function scan(){
+  async function scan() {
     setDiff([]); setSel({});
     let res;
     if (mode === 'changed') {
@@ -139,32 +181,127 @@ export default function App(){
     } else {
       res = await getStaged(repoPath);
     }
-    const items = res.items||[]; setDiff(items);
+    const items = res.items || []; setDiff(items);
   }
 
-  function toggleAll(v){ const m={}; diff.forEach(x=>m[x.path]=v); setSel(m); }
+  function toggleAll(v) { const m = {}; diff.forEach(x => m[x.path] = v); setSel(m); }
+
+  // Build tree structure from flat file list
+  function buildFileTree(files) {
+    const tree = { name: '/', path: '/', children: {}, files: [] };
+
+    files.forEach(fileInfo => {
+      const path = fileInfo.path || fileInfo;
+      const parts = path.split('/').filter(p => p);
+      let current = tree;
+
+      // Navigate/create folder structure
+      for (let i = 0; i < parts.length - 1; i++) {
+        const part = parts[i];
+        if (!current.children[part]) {
+          current.children[part] = {
+            name: part,
+            path: parts.slice(0, i + 1).join('/'),
+            children: {},
+            files: []
+          };
+        }
+        current = current.children[part];
+      }
+
+      // Add file to final folder
+      current.files.push(fileInfo);
+    });
+
+    return tree;
+  }
+
+  // Toggle folder expansion
+  function toggleFolder(folderPath) {
+    setExpandedFolders(prev => ({
+      ...prev,
+      [folderPath]: !prev[folderPath]
+    }));
+  }
+
+  // Select/deselect all files in a folder recursively
+  function toggleFolderSelection(folder, value) {
+    const newSel = { ...sel };
+
+    function processFolder(f) {
+      // Select all files in this folder
+      f.files.forEach(fileInfo => {
+        const path = fileInfo.path || fileInfo;
+        newSel[path] = value;
+      });
+
+      // Recursively process subfolders
+      Object.values(f.children).forEach(processFolder);
+    }
+
+    processFolder(folder);
+    setSel(newSel);
+  }
+
+  // Check if all files in a folder are selected
+  function isFolderSelected(folder) {
+    let allSelected = true;
+    let hasFiles = false;
+
+    function checkFolder(f) {
+      f.files.forEach(fileInfo => {
+        hasFiles = true;
+        const path = fileInfo.path || fileInfo;
+        if (!sel[path]) allSelected = false;
+      });
+      Object.values(f.children).forEach(checkFolder);
+    }
+
+    checkFolder(folder);
+    return hasFiles && allSelected;
+  }
+
+  // Check if any files in a folder are selected (for indeterminate state)
+  function isFolderPartiallySelected(folder) {
+    let someSelected = false;
+    let allSelected = true;
+    let hasFiles = false;
+
+    function checkFolder(f) {
+      f.files.forEach(fileInfo => {
+        hasFiles = true;
+        const path = fileInfo.path || fileInfo;
+        if (sel[path]) someSelected = true;
+        else allSelected = false;
+      });
+      Object.values(f.children).forEach(checkFolder);
+    }
+
+    checkFolder(folder);
+    return hasFiles && someSelected && !allSelected;
+  }
 
   // Target form state (FileZilla style)
-  const emptyTarget = { name:'', protocol:'ftps', host:'', port:'21', user:'', password:'', key:'', remoteRoot:'/', ignoreCertErrors: true };
-  const [editing,setEditing] = useState(null); // existing target id or null
-  const [tForm,setTForm] = useState(emptyTarget);
-  const [tBusy,setTBusy] = useState(false);
-  const [tMsg,setTMsg] = useState('');
+  const emptyTarget = { name: '', protocol: 'ftps', host: '', port: '21', user: '', password: '', key: '', remoteRoot: '/', ignoreCertErrors: true };
+  const [editing, setEditing] = useState(null); // existing target id or null
+  const [tForm, setTForm] = useState(emptyTarget);
+  const [tBusy, setTBusy] = useState(false);
+  const [tMsg, setTMsg] = useState('');
 
-  function startNewTarget(){ setEditing(null); setTForm(emptyTarget); setTMsg(''); }
-  function startEditTarget(t){ setEditing(t.id); setTForm({...t}); setTMsg(''); }
-  function changeT(field,val){
+  function startNewTarget() { setEditing(null); setTForm(emptyTarget); setTMsg(''); }
+  function startEditTarget(t) { setEditing(t.id); setTForm({ ...t }); setTMsg(''); }
+  function changeT(field, val) {
     if (field === 'protocol') {
       // Set default port based on protocol
       const defaultPort = val === 'sftp' ? '22' : '21';
-      setTForm(f=>({...f, [field]:val, port: f.port ? f.port : defaultPort}));
+      setTForm(f => ({ ...f, [field]: val, port: f.port ? f.port : defaultPort }));
     } else {
-      setTForm(f=>({...f,[field]:val}));
+      setTForm(f => ({ ...f, [field]: val }));
     }
   }
-  async function handleTest(){ setTBusy(true); setTMsg('Testing...'); const r=await testTarget(tForm); setTMsg(r.ok?'Connection OK': (r.error||'Failed')); setTBusy(false); }
-  async function handleSave(){
-    setTBusy(true); setTMsg(editing?'Saving...':'Creating...');
+  async function handleTest() { setTBusy(true); setTMsg('Testing...'); const r = await testTarget(tForm); setTMsg(r.ok ? 'Connection OK' : (r.error || 'Failed')); setTBusy(false); }
+  async function handleSave() {
+    setTBusy(true); setTMsg(editing ? 'Saving...' : 'Creating...');
     // Use default ports if empty and clean up remoteRoot
     const defaultPort = tForm.protocol === 'sftp' ? 22 : 21;
     const payload = {
@@ -173,15 +310,15 @@ export default function App(){
       remoteRoot: tForm.remoteRoot.trim() || '/'
     };
     try {
-      if(editing){
-        const updated = await updateTarget(editing,payload);
-        setTargets(ts=> ts.map(x=>x.id===updated.id?updated:x));
+      if (editing) {
+        const updated = await updateTarget(editing, payload);
+        setTargets(ts => ts.map(x => x.id === updated.id ? updated : x));
         setTMsg('Updated');
       } else {
         const created = await addTarget(payload);
-        setTargets(ts=> [created,...ts]); setTargetId(created.id); setTMsg('Created'); setEditing(created.id);
+        setTargets(ts => [created, ...ts]); setTargetId(created.id); setTMsg('Created'); setEditing(created.id);
       }
-    } catch(e){ setTMsg('Error'); }
+    } catch (e) { setTMsg('Error'); }
     finally { setTBusy(false); }
   }
 
@@ -383,12 +520,12 @@ export default function App(){
     setEditingFile(null);
     setShowFileEditor(false);
   }
-  async function handleDelete(id){ if(!confirm('Delete this target?')) return; await deleteTarget(id); setTargets(ts=>ts.filter(t=>t.id!==id)); if(targetId===id) setTargetId(''); if(editing===id){ setEditing(null); setTForm(emptyTarget); } }
+  async function handleDelete(id) { if (!confirm('Delete this target?')) return; await deleteTarget(id); setTargets(ts => ts.filter(t => t.id !== id)); if (targetId === id) setTargetId(''); if (editing === id) { setEditing(null); setTForm(emptyTarget); } }
 
-  async function deploy(){
-    if(!repoPath) return alert('Set repoPath');
-    if(!targetId) return alert('Pick a target');
-    if(selectedFiles.length===0) return alert('Select at least one file');
+  async function deploy() {
+    if (!repoPath) return alert('Set repoPath');
+    if (!targetId) return alert('Pick a target');
+    if (selectedFiles.length === 0) return alert('Select at least one file');
 
     // Use current remote browser path as deployment destination
     const selectedTarget = targets.find(t => t.id === targetId);
@@ -406,9 +543,9 @@ export default function App(){
       failed: []
     });
 
-    const res = await fetch('/api/deploy',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
+    const res = await fetch('/api/deploy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         repoPath,
         files: selectedFiles,
@@ -417,27 +554,27 @@ export default function App(){
       })
     });
     const es = new EventSourcePoly(res);
-    es.on('start', d=> {
-      setLog(l=>[...l, `Start: ${d.total} files → ${d.target} (${deploymentRoot})`]);
+    es.on('start', d => {
+      setLog(l => [...l, `Start: ${d.total} files → ${d.target} (${deploymentRoot})`]);
     });
-    es.on('progress', d=> {
-      setLog(l=>[...l, `${d.action || 'Uploaded'} ${d.index}/${d.total}: ${d.file}`]);
+    es.on('progress', d => {
+      setLog(l => [...l, `${d.action || 'Uploaded'} ${d.index}/${d.total}: ${d.file}`]);
       setDeploymentProgress(prev => ({
         ...prev,
         completed: [...prev.completed, d.file],
         current: d.index < d.total ? (selectedFiles[d.index]?.path || selectedFiles[d.index]) : null
       }));
     });
-    es.on('error', d=> {
-      setLog(l=>[...l, `Error: ${d.error}`]);
+    es.on('error', d => {
+      setLog(l => [...l, `Error: ${d.error}`]);
       setDeploymentProgress(prev => ({
         ...prev,
         failed: [...prev.failed, prev.current || 'Unknown file']
       }));
       setDeploymentActive(false);
     });
-    es.on('done', d=> {
-      setLog(l=>[...l, 'Done']);
+    es.on('done', d => {
+      setLog(l => [...l, 'Done']);
       es.close();
       setDeploymentActive(false);
       // Clear progress after a short delay to let user see completion
@@ -447,8 +584,95 @@ export default function App(){
     });
   }
 
+  // Render tree view recursively
+  function renderTreeFolder(folder, depth = 0) {
+    const hasChildren = Object.keys(folder.children).length > 0 || folder.files.length > 0;
+    const isExpanded = expandedFolders[folder.path];
+    const isSelected = isFolderSelected(folder);
+    const isPartial = isFolderPartiallySelected(folder);
+    const indent = depth * 20;
 
+    return (
+      <div key={folder.path} className="tree-folder">
+        <div className="tree-folder-header" style={{ paddingLeft: `${indent}px` }}>
+          {hasChildren && (
+            <button
+              className="tree-toggle"
+              onClick={() => toggleFolder(folder.path)}
+            >
+              {isExpanded ? '▼' : '▶'}
+            </button>
+          )}
+          {!hasChildren && <span className="tree-toggle-spacer"></span>}
+          <label className="tree-folder-label">
+            <input
+              type="checkbox"
+              checked={isSelected}
+              ref={el => {
+                if (el) el.indeterminate = isPartial;
+              }}
+              onChange={(e) => toggleFolderSelection(folder, e.target.checked)}
+            />
+            <span className="folder-icon">📁</span>
+            <span className="folder-name">{folder.name}</span>
+            <span className="folder-count">
+              ({folder.files.length + Object.values(folder.children).reduce((sum, f) =>
+                sum + f.files.length + Object.values(f.children).length, 0)})
+            </span>
+          </label>
+        </div>
 
+        {isExpanded && (
+          <div className="tree-folder-content">
+            {/* Render subfolders */}
+            {Object.values(folder.children)
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map(child => renderTreeFolder(child, depth + 1))}
+
+            {/* Render files */}
+            {folder.files.map(fileInfo => {
+              const path = fileInfo.path || fileInfo;
+              return (
+                <div key={path} className="tree-file" style={{ paddingLeft: `${indent + 40}px` }}>
+                  <label className={`file-item ${sel[path] ? 'on' : ''} ${fileInfo.status || ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={!!sel[path]}
+                      onChange={e => setSel({ ...sel, [path]: e.target.checked })}
+                    />
+                    <span className="file-info">
+                      <span className="file-icon">📄</span>
+                      <span className="mono file-path">{fileInfo.name || path.split('/').pop()}</span>
+                      {fileInfo.status && (
+                        <span className={`status-badge ${fileInfo.status}`}>
+                          {fileInfo.status === 'renamed' && fileInfo.oldPath ? `${fileInfo.status} from ${fileInfo.oldPath}` : fileInfo.status}
+                        </span>
+                      )}
+                      {fileInfo.action && (
+                        <span className={`action-badge ${fileInfo.action}`}>
+                          {fileInfo.action === 'delete' ? '🗑️' :
+                            fileInfo.action === 'rename' ? '📝🗑️📤' :
+                              fileInfo.action === 'upload' ? '📤' : ''}
+                        </span>
+                      )}
+                      {fileInfo.status === 'renamed' && fileInfo.oldPath && (
+                        <div className="rename-operations">
+                          <span className="rename-op delete">🗑️ Delete: {fileInfo.oldPath}</span>
+                          <span className="rename-op upload">📤 Upload: {path}</span>
+                        </div>
+                      )}
+                    </span>
+                  </label>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const fileTree = useMemo(() => buildFileTree(diff), [diff]);
   return (
     <div className="wrap">
       <header className="app-header">
@@ -456,7 +680,7 @@ export default function App(){
         <h1>TwinDeploy</h1>
         <p>Selective Git file deployment & replay to other targets via FTP</p>
         <div className="header-actions">
-          <button className="btn" onClick={()=>setDark(d=>!d)}>
+          <button className="btn" onClick={() => setDark(d => !d)}>
             {dark ? '☀️ Light' : '🌙 Dark'} mode
           </button>
         </div>
@@ -467,17 +691,17 @@ export default function App(){
           <h3>1) Remote Targets</h3>
           <div className="target-form">
             <div className="row tight wrap">
-              <input placeholder="Name" value={tForm.name} onChange={e=>changeT('name',e.target.value)} style={{flex:'1 1 120px'}} />
-              <select value={tForm.protocol} onChange={e=>changeT('protocol',e.target.value)}>
+              <input placeholder="Name" value={tForm.name} onChange={e => changeT('name', e.target.value)} style={{ flex: '1 1 120px' }} />
+              <select value={tForm.protocol} onChange={e => changeT('protocol', e.target.value)}>
                 <option value="ftps">ftps</option>
                 <option value="sftp">sftp</option>
               </select>
-              <input placeholder="Host" value={tForm.host} onChange={e=>changeT('host',e.target.value)} style={{flex:'1 1 160px'}} />
-              <input placeholder={tForm.protocol === 'sftp' ? 'Port (22)' : 'Port (21)'} value={tForm.port} onChange={e=>changeT('port',e.target.value.replace(/[^0-9]/g,''))} style={{width:70}} />
-              <input placeholder="User" value={tForm.user} onChange={e=>changeT('user',e.target.value)} style={{flex:'1 1 120px'}} />
-              {tForm.protocol==='sftp' && <input placeholder="Key path (optional)" value={tForm.key} onChange={e=>changeT('key',e.target.value)} style={{flex:'2 1 200px'}} />}
-              <input type="password" placeholder="Password" value={tForm.password} onChange={e=>changeT('password',e.target.value)} style={{flex:'1 1 140px'}} />
-              <input placeholder="Remote root (optional)" value={tForm.remoteRoot} onChange={e=>changeT('remoteRoot',e.target.value)} style={{flex:'2 1 200px'}} />
+              <input placeholder="Host" value={tForm.host} onChange={e => changeT('host', e.target.value)} style={{ flex: '1 1 160px' }} />
+              <input placeholder={tForm.protocol === 'sftp' ? 'Port (22)' : 'Port (21)'} value={tForm.port} onChange={e => changeT('port', e.target.value.replace(/[^0-9]/g, ''))} style={{ width: 70 }} />
+              <input placeholder="User" value={tForm.user} onChange={e => changeT('user', e.target.value)} style={{ flex: '1 1 120px' }} />
+              {tForm.protocol === 'sftp' && <input placeholder="Key path (optional)" value={tForm.key} onChange={e => changeT('key', e.target.value)} style={{ flex: '2 1 200px' }} />}
+              <input type="password" placeholder="Password" value={tForm.password} onChange={e => changeT('password', e.target.value)} style={{ flex: '1 1 140px' }} />
+              <input placeholder="Remote root (optional)" value={tForm.remoteRoot} onChange={e => changeT('remoteRoot', e.target.value)} style={{ flex: '2 1 200px' }} />
             </div>
             <div className="row tight">
               {tForm.protocol === 'ftps' && (
@@ -489,20 +713,20 @@ export default function App(){
             </div>
             <div className="row tight">
               <button className="btn sm" disabled={tBusy} onClick={handleTest}>Test</button>
-              <button className="btn sm primary" disabled={tBusy || !tForm.host} onClick={handleSave}>{editing?'Update':'Create'}</button>
+              <button className="btn sm primary" disabled={tBusy || !tForm.host} onClick={handleSave}>{editing ? 'Update' : 'Create'}</button>
               <button className="btn sm" disabled={tBusy} onClick={startNewTarget}>New</button>
-              {editing && <button className="btn sm" disabled={tBusy} onClick={()=>handleDelete(editing)}>Delete</button>}
-              <span className="tmsg mono" style={{marginLeft:'auto'}}>{tMsg}</span>
+              {editing && <button className="btn sm" disabled={tBusy} onClick={() => handleDelete(editing)}>Delete</button>}
+              <span className="tmsg mono" style={{ marginLeft: 'auto' }}>{tMsg}</span>
             </div>
           </div>
           <div className="list compact">
-            {targets.map(t=> (
-              <div key={t.id} className={`target-item selectable ${t.id===targetId?'active':''}`} onClick={()=>{ setTargetId(t.id); startEditTarget(t); }}>
-                <strong>{t.name||t.host}</strong> <code>{t.protocol}</code>
-                <span className="id">#{t.id.slice(0,8)}</span>
+            {targets.map(t => (
+              <div key={t.id} className={`target-item selectable ${t.id === targetId ? 'active' : ''}`} onClick={() => { setTargetId(t.id); startEditTarget(t); }}>
+                <strong>{t.name || t.host}</strong> <code>{t.protocol}</code>
+                <span className="id">#{t.id.slice(0, 8)}</span>
               </div>
             ))}
-            {targets.length===0 && <div className="empty">No targets yet.</div>}
+            {targets.length === 0 && <div className="empty">No targets yet.</div>}
           </div>
         </section>
 
@@ -523,8 +747,8 @@ export default function App(){
                 )}
                 <div className={`connection-status ${connectionStatus}`}>
                   {connectionStatus === 'connected' ? 'Connected' :
-                   connectionStatus === 'disconnected' ? 'Disconnected' :
-                   connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnecting...'}
+                    connectionStatus === 'disconnected' ? 'Disconnected' :
+                      connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnecting...'}
                 </div>
               </>
             )}
@@ -614,14 +838,15 @@ export default function App(){
         <section className="panel accent">
           <h3>3) Local Repository</h3>
           <div className="row tight">
-            <input value={repoPath} onChange={e=>setRepoPath(e.target.value)} placeholder="/absolute/path/to/repo" style={{flex:1}} />
+            <input value={repoPath} onChange={e => setRepoPath(e.target.value)} placeholder="/absolute/path/to/repo" style={{ flex: 1 }} />
+            <button className="btn" onClick={openFolderPicker} title="Browse for folder">📁 Browse</button>
           </div>
           <div className="row tight">
-            <label className="radio"><input type="radio" checked={mode==='changed'} onChange={()=>setMode('changed')} /> Changed since</label>
-            <input value={baseRef} onChange={e=>setBaseRef(e.target.value)} style={{width:140}} disabled={mode!=='changed'} />
-            <label className="radio"><input type="radio" checked={mode==='staged'} onChange={()=>setMode('staged')} /> Staged</label>
-            <label className="radio"><input type="radio" checked={mode==='committed'} onChange={()=>setMode('committed')} /> Committed vs</label>
-            <select value={baseBranch} onChange={e=>setBaseBranch(e.target.value)} style={{width:140}} disabled={mode!=='committed'}>
+            <label className="radio"><input type="radio" checked={mode === 'changed'} onChange={() => setMode('changed')} /> Changed since</label>
+            <input value={baseRef} onChange={e => setBaseRef(e.target.value)} style={{ width: 140 }} disabled={mode !== 'changed'} />
+            <label className="radio"><input type="radio" checked={mode === 'staged'} onChange={() => setMode('staged')} /> Staged</label>
+            <label className="radio"><input type="radio" checked={mode === 'committed'} onChange={() => setMode('committed')} /> Committed vs</label>
+            <select value={baseBranch} onChange={e => setBaseBranch(e.target.value)} style={{ width: 140 }} disabled={mode !== 'committed'}>
               {availableBranches.map(branch => (
                 <option key={branch} value={branch}>{branch}</option>
               ))}
@@ -642,41 +867,114 @@ export default function App(){
         <section className="panel files-panel">
           <h3>4) Files <span className="badge">{selectedFiles.length}/{diff.length}</span></h3>
           <div className="toolbar">
-            <button className="btn sm" onClick={()=>toggleAll(true)}>All</button>
-            <button className="btn sm" onClick={()=>toggleAll(false)}>None</button>
+            <div className="view-toggle">
+              <button
+                className={`btn sm ${fileViewMode === 'list' ? 'active' : ''}`}
+                onClick={() => setFileViewMode('list')}
+              >
+                📄 List
+              </button>
+              <button
+                className={`btn sm ${fileViewMode === 'tree' ? 'active' : ''}`}
+                onClick={() => setFileViewMode('tree')}
+              >
+                🌲 Tree
+              </button>
+            </div>
+            <div className="selection-actions">
+              <button className="btn sm" onClick={() => toggleAll(true)}>All</button>
+              <button className="btn sm" onClick={() => toggleAll(false)}>None</button>
+              {fileViewMode === 'tree' && (
+                <>
+                  <button className="btn sm" onClick={() => setExpandedFolders({})}>Collapse All</button>
+                  <button className="btn sm" onClick={() => {
+                    const allFolders = {};
+                    function collectFolders(folder) {
+                      allFolders[folder.path] = true;
+                      Object.values(folder.children).forEach(collectFolders);
+                    }
+                    collectFolders(fileTree);
+                    setExpandedFolders(allFolders);
+                  }}>Expand All</button>
+                </>
+              )}
+            </div>
           </div>
-          <div className="list files">
-            {diff.map(it=> (
-              <label key={it.path} className={`file-item ${sel[it.path]?'on':''} ${it.status || ''}`}>
-                <input type="checkbox" checked={!!sel[it.path]} onChange={e=>setSel({...sel,[it.path]:e.target.checked})} />
-                <span className="file-info">
-                  <span className="mono file-path">{it.path}</span>
-                  {it.status && (
-                    <span className={`status-badge ${it.status}`}>
-                      {it.status === 'renamed' && it.oldPath ? `${it.status} from ${it.oldPath}` : it.status}
-                    </span>
-                  )}
-                  {it.action && (
-                    <span className={`action-badge ${it.action}`}>
-                      {it.action === 'delete' ? '🗑️' :
-                       it.action === 'rename' ? '📝🗑️📤' :
-                       it.action === 'upload' ? '📤' : ''}
-                    </span>
-                  )}
-                  {it.status === 'renamed' && it.oldPath && (
-                    <div className="rename-operations">
-                      <span className="rename-op delete">🗑️ Delete: {it.oldPath}</span>
-                      <span className="rename-op upload">📤 Upload: {it.path}</span>
-                    </div>
-                  )}
-                </span>
-              </label>
-            ))}
-            {diff.length===0 && <div className="empty">No results. Scan first.</div>}
-          </div>
-        </section>
 
-        <section className="panel wide">
+          {fileViewMode === 'list' ? (
+            <div className="list files">
+              {diff.map(it => (
+                <label key={it.path} className={`file-item ${sel[it.path] ? 'on' : ''} ${it.status || ''}`}>
+                  <input type="checkbox" checked={!!sel[it.path]} onChange={e => setSel({ ...sel, [it.path]: e.target.checked })} />
+                  <span className="file-info">
+                    <span className="mono file-path">{it.path}</span>
+                    {it.status && (
+                      <span className={`status-badge ${it.status}`}>
+                        {it.status === 'renamed' && it.oldPath ? `${it.status} from ${it.oldPath}` : it.status}
+                      </span>
+                    )}
+                    {it.action && (
+                      <span className={`action-badge ${it.action}`}>
+                        {it.action === 'delete' ? '🗑️' :
+                          it.action === 'rename' ? '📝🗑️📤' :
+                            it.action === 'upload' ? '📤' : ''}
+                      </span>
+                    )}
+                    {it.status === 'renamed' && it.oldPath && (
+                      <div className="rename-operations">
+                        <span className="rename-op delete">🗑️ Delete: {it.oldPath}</span>
+                        <span className="rename-op upload">📤 Upload: {it.path}</span>
+                      </div>
+                    )}
+                  </span>
+                </label>
+              ))}
+              {diff.length === 0 && <div className="empty">No results. Scan first.</div>}
+            </div>
+          ) : (
+            <div className="tree-view">
+              {diff.length > 0 ? (
+                <div className="tree-container">
+                  {Object.values(fileTree.children)
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map(child => renderTreeFolder(child, 0))}
+                  {fileTree.files.map(fileInfo => {
+                    const path = fileInfo.path || fileInfo;
+                    return (
+                      <div key={path} className="tree-file root-file">
+                        <label className={`file-item ${sel[path] ? 'on' : ''} ${fileInfo.status || ''}`}>
+                          <input
+                            type="checkbox"
+                            checked={!!sel[path]}
+                            onChange={e => setSel({ ...sel, [path]: e.target.checked })}
+                          />
+                          <span className="file-info">
+                            <span className="file-icon">📄</span>
+                            <span className="mono file-path">{fileInfo.name || path}</span>
+                            {fileInfo.status && (
+                              <span className={`status-badge ${fileInfo.status}`}>
+                                {fileInfo.status === 'renamed' && fileInfo.oldPath ? `${fileInfo.status} from ${fileInfo.oldPath}` : fileInfo.status}
+                              </span>
+                            )}
+                            {fileInfo.action && (
+                              <span className={`action-badge ${fileInfo.action}`}>
+                                {fileInfo.action === 'delete' ? '🗑️' :
+                                  fileInfo.action === 'rename' ? '📝🗑️📤' :
+                                    fileInfo.action === 'upload' ? '📤' : ''}
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="empty">No results. Scan first.</div>
+              )}
+            </div>
+          )}
+        </section>        <section className="panel wide">
           <h3>File Queue & Deployment Progress <span className="badge">{selectedFiles.length}</span></h3>
 
           {/* Deployment Progress Display (only shown during deployment) */}
@@ -836,9 +1134,12 @@ export default function App(){
               <button
                 className="btn primary"
                 onClick={deploy}
-                disabled={!targetId||selectedFiles.length===0}
+                disabled={!targetId || selectedFiles.length === 0 || deploymentActive}
               >
-                Deploy {selectedFiles.length > 0 ? `${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}` : 'selected'}
+                {deploymentActive
+                  ? `Deploying... (${deploymentProgress.completed.length}/${deploymentProgress.total})`
+                  : `Deploy ${selectedFiles.length > 0 ? `${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}` : 'selected'}`
+                }
               </button>
             </div>
           </div>
@@ -847,10 +1148,10 @@ export default function App(){
         <section className="panel wide">
           <h3>5) Log</h3>
           <div className="log">
-            {log.map((msg,i)=> <div key={i}>{msg}</div>)}
+            {log.map((msg, i) => <div key={i}>{msg}</div>)}
           </div>
           <div className="row tight">
-            <button className="btn sm" onClick={()=>setLog([])}>Clear</button>
+            <button className="btn sm" onClick={() => setLog([])}>Clear</button>
           </div>
         </section>
       </div>
@@ -887,6 +1188,114 @@ export default function App(){
                 >
                   Save {editingFile.content !== editingFile.originalContent ? '*' : ''}
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Folder Picker Modal */}
+      {showFolderPicker && (
+        <div className="modal-overlay" onClick={() => setShowFolderPicker(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 600 }}>
+            <div className="modal-header">
+              <h3>📁 Select Repository Folder</h3>
+              <button className="btn sm" onClick={() => setShowFolderPicker(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              {folderPickerLoading ? (
+                <div style={{ padding: 20, textAlign: 'center' }}>Loading...</div>
+              ) : folderPickerData ? (
+                <>
+                  <div className="folder-picker-path">
+                    <button
+                      className="btn sm"
+                      onClick={() => navigateToFolder(folderPickerData.parent)}
+                      disabled={!folderPickerData.parent}
+                      title="Go to parent folder"
+                    >
+                      ⬆️ Up
+                    </button>
+                    <span className="mono" style={{ marginLeft: 10, fontSize: '0.9em' }}>
+                      {folderPickerData.currentPath}
+                    </span>
+                  </div>
+
+                  {/* Volumes section - show when at home directory */}
+                  {folderPickerData.volumes && folderPickerData.volumes.length > 0 && (
+                    <div className="folder-picker-section">
+                      <div className="folder-picker-section-title">💾 Volumes & Drives</div>
+                      <div className="folder-picker-list" style={{ marginBottom: 12 }}>
+                        {folderPickerData.volumes.map(vol => (
+                          <div key={vol.path} className="folder-picker-item volume-item">
+                            <button
+                              className="btn sm"
+                              onClick={() => navigateToFolder(vol.path)}
+                              style={{ marginRight: 10 }}
+                              title="Open volume"
+                            >
+                              💾
+                            </button>
+                            <span className="folder-name" style={{ flex: 1 }}>
+                              {vol.name}
+                            </span>
+                            <button
+                              className="btn sm"
+                              onClick={() => navigateToFolder(vol.path)}
+                              title="Browse volume"
+                            >
+                              Open
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Folders section */}
+                  {folderPickerData.isHome && <div className="folder-picker-section-title">📁 Folders</div>}
+                  <div className="folder-picker-list">
+                    {folderPickerData.directories.length === 0 ? (
+                      <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)' }}>
+                        No folders found in this directory
+                      </div>
+                    ) : (
+                      folderPickerData.directories.map(dir => (
+                        <div key={dir.path} className="folder-picker-item">
+                          <button
+                            className="btn sm"
+                            onClick={() => navigateToFolder(dir.path)}
+                            style={{ marginRight: 10 }}
+                            title="Open folder"
+                          >
+                            📁
+                          </button>
+                          <span className="folder-name" style={{ flex: 1 }}>
+                            {dir.name}
+                            {dir.isGitRepo && <span className="git-badge" title="Git repository">🔀 Git</span>}
+                          </span>
+                          <button
+                            className="btn sm primary"
+                            onClick={() => selectFolder(dir.path)}
+                            disabled={!dir.isGitRepo}
+                            title={dir.isGitRepo ? 'Select this repository' : 'Not a Git repository'}
+                          >
+                            {dir.isGitRepo ? 'Select' : ''}
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)' }}>
+                  Failed to load folders
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <div className="hint">
+                💡 Only Git repositories can be selected. Navigate through folders to find your repository.
               </div>
             </div>
           </div>

@@ -8,6 +8,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import os from 'os';
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,37 +23,37 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
 
 // Health
-app.get('/api/health', (req,res)=>res.json({ ok:true }));
+app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // Targets CRUD
-app.get('/api/targets', async (req,res)=> res.json(await getTargets()));
-app.post('/api/targets', async (req,res)=>{ const list = await getTargets(); list.unshift({ id: uuid(), ...req.body }); await saveTargets(list); res.json(list[0]); });
-app.put('/api/targets/:id', async (req,res)=>{ const list = await getTargets(); const i=list.findIndex(t=>t.id===req.params.id); if(i<0) return res.sendStatus(404); list[i]={...list[i],...req.body}; await saveTargets(list); res.json(list[i]); });
-app.delete('/api/targets/:id', async (req,res)=>{ const list = await getTargets(); const n=list.filter(t=>t.id!==req.params.id); await saveTargets(n); res.json({ ok:true }); });
+app.get('/api/targets', async (req, res) => res.json(await getTargets()));
+app.post('/api/targets', async (req, res) => { const list = await getTargets(); list.unshift({ id: uuid(), ...req.body }); await saveTargets(list); res.json(list[0]); });
+app.put('/api/targets/:id', async (req, res) => { const list = await getTargets(); const i = list.findIndex(t => t.id === req.params.id); if (i < 0) return res.sendStatus(404); list[i] = { ...list[i], ...req.body }; await saveTargets(list); res.json(list[i]); });
+app.delete('/api/targets/:id', async (req, res) => { const list = await getTargets(); const n = list.filter(t => t.id !== req.params.id); await saveTargets(n); res.json({ ok: true }); });
 
 // Repo diffs
-app.get('/api/repo/changed', async (req,res)=>{
+app.get('/api/repo/changed', async (req, res) => {
   try {
-    const { repoPath, baseRef='HEAD~1' } = req.query;
+    const { repoPath, baseRef = 'HEAD~1' } = req.query;
     const items = await listChanged(repoPath, baseRef);
     res.json({ items });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.get('/api/repo/staged', async (req,res)=>{
+app.get('/api/repo/staged', async (req, res) => {
   try {
     const { repoPath } = req.query;
     const items = await listStaged(repoPath);
     res.json({ items });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.get('/api/repo/committed', async (req,res)=>{
+app.get('/api/repo/committed', async (req, res) => {
   try {
-    const { repoPath, baseBranch='main' } = req.query;
+    const { repoPath, baseBranch = 'main' } = req.query;
     const items = await listCommittedChanges(repoPath, baseBranch);
     res.json({ items });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.get('/api/repo/branches', async (req,res)=>{
+app.get('/api/repo/branches', async (req, res) => {
   try {
     const { repoPath } = req.query;
     const baseBranches = await getBaseBranches(repoPath);
@@ -61,12 +62,123 @@ app.get('/api/repo/branches', async (req,res)=>{
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Local directory browsing for folder selection
+app.get('/api/browse', async (req, res) => {
+  try {
+    const { dirPath } = req.query;
+
+    // Start from home directory if no path provided
+    let targetDir = dirPath || os.homedir();
+
+    // Resolve the path
+    targetDir = path.resolve(targetDir);
+
+    // Security check: ensure we're not browsing system-critical directories
+    const homeDir = os.homedir();
+    const isInDockerHost = targetDir.startsWith('/host/');
+
+    // Read directory contents
+    const entries = await fs.readdir(targetDir, { withFileTypes: true });
+
+    // Filter for directories only and check for .git
+    const directories = [];
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith('.')) {
+        const fullPath = path.join(targetDir, entry.name);
+        let isGitRepo = false;
+
+        try {
+          const gitPath = path.join(fullPath, '.git');
+          const gitStat = await fs.stat(gitPath);
+          isGitRepo = gitStat.isDirectory();
+        } catch (e) {
+          // Not a git repo, that's fine
+        }
+
+        directories.push({
+          name: entry.name,
+          path: fullPath,
+          isGitRepo
+        });
+      }
+    }
+
+    // Sort: git repos first, then alphabetically
+    directories.sort((a, b) => {
+      if (a.isGitRepo && !b.isGitRepo) return -1;
+      if (!a.isGitRepo && b.isGitRepo) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    // Get parent directory - allow going up to root
+    const parent = targetDir !== '/' ? path.dirname(targetDir) : null;
+
+    // Check if we should show volumes (macOS) or other mount points
+    let volumes = [];
+    const isAtHome = targetDir === homeDir;
+
+    // On macOS, check for /Volumes; on Linux, check common mount points
+    if (isAtHome || targetDir === '/') {
+      try {
+        // macOS volumes
+        if (process.platform === 'darwin') {
+          const volumeEntries = await fs.readdir('/Volumes', { withFileTypes: true });
+          for (const vol of volumeEntries) {
+            if (vol.isDirectory() || vol.isSymbolicLink()) {
+              const volPath = `/Volumes/${vol.name}`;
+              volumes.push({
+                name: vol.name,
+                path: volPath,
+                isVolume: true,
+                isGitRepo: false
+              });
+            }
+          }
+        }
+        // Linux mount points
+        else if (process.platform === 'linux') {
+          const mountPoints = ['/mnt', '/media', '/host'];
+          for (const mp of mountPoints) {
+            try {
+              const mpEntries = await fs.readdir(mp, { withFileTypes: true });
+              for (const entry of mpEntries) {
+                if (entry.isDirectory()) {
+                  volumes.push({
+                    name: `${mp}/${entry.name}`,
+                    path: `${mp}/${entry.name}`,
+                    isVolume: true,
+                    isGitRepo: false
+                  });
+                }
+              }
+            } catch (e) {
+              // Mount point doesn't exist, skip
+            }
+          }
+        }
+      } catch (e) {
+        // Can't read volumes, that's fine
+      }
+    }
+
+    res.json({
+      currentPath: targetDir,
+      parent,
+      directories,
+      volumes,
+      isHome: targetDir === homeDir
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // Deploy (creates manifest + streams progress via SSE)
-app.post('/api/deploy', async (req,res)=>{
+app.post('/api/deploy', async (req, res) => {
   const { repoPath, files, targetId, note, deploymentRoot } = req.body;
   const targets = await getTargets();
-  const target = targets.find(t=>t.id===targetId);
-  if(!target) return res.status(400).json({ error: 'Target not found' });
+  const target = targets.find(t => t.id === targetId);
+  if (!target) return res.status(400).json({ error: 'Target not found' });
 
   // Use deploymentRoot if provided, otherwise fall back to target's remoteRoot
   const effectiveRemoteRoot = deploymentRoot || target.remoteRoot || '/';
@@ -77,11 +189,11 @@ app.post('/api/deploy', async (req,res)=>{
   await addManifest(manifest);
 
   // SSE progress
-  res.writeHead(200, { 'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive' });
-  const write = (e,d)=>res.write(`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`);
-  write('start', { id, total: files.length, target: target.name||target.host });
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  const write = (e, d) => res.write(`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`);
+  write('start', { id, total: files.length, target: target.name || target.host });
 
-  const onProgress = (p)=> write('progress', p);
+  const onProgress = (p) => write('progress', p);
 
   try {
     // Create a modified target with the effective remote root
@@ -92,9 +204,9 @@ app.post('/api/deploy', async (req,res)=>{
     } else if (target.protocol === 'ftps') {
       await uploadWithFTPS(targetWithEffectiveRoot, root, files, onProgress);
     } else {
-      throw new Error('Unsupported protocol: '+target.protocol);
+      throw new Error('Unsupported protocol: ' + target.protocol);
     }
-    write('done', { ok:true });
+    write('done', { ok: true });
   } catch (err) {
     write('error', { error: err.message });
   } finally {
@@ -103,18 +215,18 @@ app.post('/api/deploy', async (req,res)=>{
 });
 
 // Replay previous manifest to a different target
-app.post('/api/replay', async (req,res)=>{
+app.post('/api/replay', async (req, res) => {
   const { manifestId, targetId } = req.body;
   const manifests = await getManifests();
-  const m = manifests.find(x=>x.id===manifestId);
-  if(!m) return res.status(404).json({ error: 'Manifest not found' });
+  const m = manifests.find(x => x.id === manifestId);
+  if (!m) return res.status(404).json({ error: 'Manifest not found' });
   const targets = await getTargets();
-  const target = targets.find(t=>t.id===targetId);
-  if(!target) return res.status(400).json({ error: 'Target not found' });
+  const target = targets.find(t => t.id === targetId);
+  if (!target) return res.status(400).json({ error: 'Target not found' });
 
-  res.writeHead(200, { 'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive' });
-  const write = (e,d)=>res.write(`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`);
-  write('start', { id: m.id, total: m.files.length, target: target.name||target.host, replay:true });
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  const write = (e, d) => res.write(`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`);
+  write('start', { id: m.id, total: m.files.length, target: target.name || target.host, replay: true });
 
   try {
     // Use the stored deployment root from the manifest, fall back to target's remoteRoot
@@ -122,40 +234,40 @@ app.post('/api/replay', async (req,res)=>{
     const targetWithEffectiveRoot = { ...target, remoteRoot: effectiveRemoteRoot };
 
     if (target.protocol === 'sftp') {
-      await uploadWithSFTP(targetWithEffectiveRoot, m.repoRoot, m.files, (p)=>write('progress', p));
+      await uploadWithSFTP(targetWithEffectiveRoot, m.repoRoot, m.files, (p) => write('progress', p));
     } else if (target.protocol === 'ftps') {
-      await uploadWithFTPS(targetWithEffectiveRoot, m.repoRoot, m.files, (p)=>write('progress', p));
+      await uploadWithFTPS(targetWithEffectiveRoot, m.repoRoot, m.files, (p) => write('progress', p));
     } else {
-      throw new Error('Unsupported protocol: '+target.protocol);
+      throw new Error('Unsupported protocol: ' + target.protocol);
     }
-    write('done', { ok:true });
+    write('done', { ok: true });
   } catch (err) {
     write('error', { error: err.message });
   } finally { res.end(); }
 });
 
-app.get('/api/manifests', async (req,res)=> res.json(await getManifests()));
+app.get('/api/manifests', async (req, res) => res.json(await getManifests()));
 
 // Test connection (without saving). Expects { protocol, host, port, user, password, key, remoteRoot }
-app.post('/api/targets/test', async (req,res)=>{
+app.post('/api/targets/test', async (req, res) => {
   const { protocol, host, port, user, password, key, remoteRoot, ignoreCertErrors } = req.body || {};
-  if(!protocol || !host) return res.status(400).json({ error:'protocol & host required' });
+  if (!protocol || !host) return res.status(400).json({ error: 'protocol & host required' });
   try {
-    if(protocol==='sftp'){
+    if (protocol === 'sftp') {
       const SftpClient = (await import('ssh2-sftp-client')).default; const c = new SftpClient();
-      await c.connect({ host, port:port||22, username:user, password, privateKeyPath:key });
+      await c.connect({ host, port: port || 22, username: user, password, privateKeyPath: key });
       // try remote root existence (optional)
-      if(remoteRoot){ try { await c.exists(remoteRoot); } catch { /* ignore */ } }
+      if (remoteRoot) { try { await c.exists(remoteRoot); } catch { /* ignore */ } }
       await c.end();
-    } else if(protocol==='ftps') {
-      const ftp = (await import('basic-ftp')).default; const client = new ftp.Client(0); client.ftp.verbose=false;
+    } else if (protocol === 'ftps') {
+      const ftp = (await import('basic-ftp')).default; const client = new ftp.Client(0); client.ftp.verbose = false;
 
       const accessOptions = {
         host,
         user,
         password,
         secure: true,
-        port: port||21
+        port: port || 21
       };
 
       // Configure SSL options to ignore certificate errors if requested
@@ -167,13 +279,13 @@ app.post('/api/targets/test', async (req,res)=>{
       }
 
       await client.access(accessOptions);
-      if(remoteRoot){ try { await client.ensureDir(remoteRoot); } catch { /* ignore */ } }
+      if (remoteRoot) { try { await client.ensureDir(remoteRoot); } catch { /* ignore */ } }
       client.close();
     } else {
-      return res.status(400).json({ error:'Unsupported protocol' });
+      return res.status(400).json({ error: 'Unsupported protocol' });
     }
-    res.json({ ok:true });
-  } catch (e){ res.status(400).json({ error: e.message }); }
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // Remote directory browsing - NOT IN USE (replaced by the connection-aware version below)
@@ -464,7 +576,8 @@ app.post('/api/targets/:id/upload', async (req, res) => {
         } catch (unlinkError) {
           console.warn('Failed to clean up temp file:', unlinkError.message);
         }
-      }    } else {
+      }
+    } else {
       res.status(400).json({ error: 'Unsupported protocol' });
     }
   } catch (error) {
@@ -498,9 +611,9 @@ process.on('SIGINT', async () => {
 });
 
 // Start server (fixed port). If occupied, exit so developer can free it.
-app.listen(PORT, ()=> console.log('TwinDeploy backend on http://localhost:'+PORT))
+app.listen(PORT, () => console.log('TwinDeploy backend on http://localhost:' + PORT))
   .on('error', err => {
-    if(err.code === 'EADDRINUSE') {
+    if (err.code === 'EADDRINUSE') {
       console.error(`Port ${PORT} already in use. Stop the other process or set PORT env.`);
       process.exit(1);
     } else {
