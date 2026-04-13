@@ -48,8 +48,8 @@ app.get('/api/repo/staged', async (req, res) => {
 });
 app.get('/api/repo/committed', async (req, res) => {
   try {
-    const { repoPath, baseBranch = 'main' } = req.query;
-    const items = await listCommittedChanges(repoPath, baseBranch);
+    const { repoPath, baseBranch = 'main', compareMode = 'net' } = req.query;
+    const items = await listCommittedChanges(repoPath, baseBranch, compareMode);
     res.json({ items });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });

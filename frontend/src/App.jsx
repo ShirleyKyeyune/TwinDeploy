@@ -63,6 +63,7 @@ export default function App() {
   const [mode, setMode] = useState('staged'); // 'changed' | 'staged' | 'committed'
   const [baseRef, setBaseRef] = useState('HEAD~1');
   const [baseBranch, setBaseBranch] = useState(''); // For committed changes mode
+  const [committedCompareMode, setCommittedCompareMode] = useState('net'); // 'pr' | 'net'
   const [availableBranches, setAvailableBranches] = useState([]);
   const [currentBranch, setCurrentBranch] = useState('');
   const [diff, setDiff] = useState([]);
@@ -255,7 +256,7 @@ export default function App() {
     if (mode === 'changed') {
       res = await getChanged(repoPath, baseRef);
     } else if (mode === 'committed') {
-      res = await getCommitted(repoPath, baseBranch);
+      res = await getCommitted(repoPath, baseBranch, committedCompareMode);
     } else {
       res = await getStaged(repoPath);
     }
@@ -951,11 +952,15 @@ export default function App() {
               ))}
               {availableBranches.length === 0 && <option value="">no branches</option>}
             </select>
+            <select value={committedCompareMode} onChange={e => setCommittedCompareMode(e.target.value)} style={{ width: 110 }} disabled={mode !== 'committed'} title="Comparison type: PR diff uses merge-base, Net diff compares branch tips">
+              <option value="pr">PR diff</option>
+              <option value="net">Net diff</option>
+            </select>
             <button className="btn primary" onClick={scan}>Scan</button>
           </div>
           <div className="hint">
             {mode === 'committed' && currentBranch ?
-              `On branch: ${currentBranch}. Comparing committed changes against ${baseBranch}.` :
+              `On branch: ${currentBranch}. Comparing against ${baseBranch} using ${committedCompareMode === 'pr' ? 'PR diff (merge-base)' : 'Net diff (tip-to-tip)'}.` :
               mode === 'staged' ?
                 'Staged files ready for commit.' :
                 'Changed files since the specified reference.'

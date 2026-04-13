@@ -72,9 +72,10 @@ export async function listChanged(repoPath, baseRef = 'HEAD~1') {
   return parseDiffOutput(diffOutput);
 }
 
-export async function listCommittedChanges(repoPath, baseBranch = 'main') {
+export async function listCommittedChanges(repoPath, baseBranch = 'main', compareMode = 'pr') {
   const git = simpleGit(repoPath);
   const root = await getRepoRoot(repoPath);
+  const mode = compareMode === 'net' ? 'net' : 'pr';
 
   try {
     let effectiveBaseBranch = baseBranch;
@@ -92,7 +93,9 @@ export async function listCommittedChanges(repoPath, baseBranch = 'main') {
     }
 
     // Get files changed between base branch and current branch
-    const compareRef = effectiveBaseBranch === 'HEAD~1' ? 'HEAD~1...HEAD' : `${effectiveBaseBranch}...HEAD`;
+    const compareRef = effectiveBaseBranch === 'HEAD~1'
+      ? (mode === 'net' ? 'HEAD~1..HEAD' : 'HEAD~1...HEAD')
+      : (mode === 'net' ? `${effectiveBaseBranch}..HEAD` : `${effectiveBaseBranch}...HEAD`);
     const diffOutput = await git.diff([compareRef, '--name-status', '--diff-filter=ACMRTD']);
     return parseDiffOutput(diffOutput);
   } catch (error) {
@@ -102,11 +105,13 @@ export async function listCommittedChanges(repoPath, baseBranch = 'main') {
         throw new Error('No base branch available');
       }
       const fallbackBase = baseBranch.startsWith('origin/') ? baseBranch.slice(7) : `origin/${baseBranch}`;
-      const diffOutput = await git.diff([`${fallbackBase}...HEAD`, '--name-status', '--diff-filter=ACMRTD']);
+      const fallbackRef = mode === 'net' ? `${fallbackBase}..HEAD` : `${fallbackBase}...HEAD`;
+      const diffOutput = await git.diff([fallbackRef, '--name-status', '--diff-filter=ACMRTD']);
       return parseDiffOutput(diffOutput);
     } catch (fallbackError) {
       // Final fallback to HEAD~1
-      const diffOutput = await git.diff(['HEAD~1...HEAD', '--name-status', '--diff-filter=ACMRTD']);
+      const finalFallbackRef = mode === 'net' ? 'HEAD~1..HEAD' : 'HEAD~1...HEAD';
+      const diffOutput = await git.diff([finalFallbackRef, '--name-status', '--diff-filter=ACMRTD']);
       return parseDiffOutput(diffOutput);
     }
   }
