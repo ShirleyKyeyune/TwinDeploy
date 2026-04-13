@@ -7,7 +7,7 @@ export async function getStaged(repoPath) {
   return r.json();
 }
 export async function getCommitted(repoPath, baseBranch) {
-  const r = await fetch(`/api/repo/committed?repoPath=${encodeURIComponent(repoPath)}&baseBranch=${encodeURIComponent(baseBranch || 'main')}`);
+  const r = await fetch(`/api/repo/committed?repoPath=${encodeURIComponent(repoPath)}&baseBranch=${encodeURIComponent(baseBranch || '')}`);
   return r.json();
 }
 export async function getBranches(repoPath) {

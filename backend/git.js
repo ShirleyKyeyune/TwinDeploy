@@ -1,6 +1,27 @@
 import simpleGit from 'simple-git';
 import fs from 'fs/promises';
 
+function pickPreferredBaseBranch(branches = []) {
+  if (!branches.length) return '';
+  const preferredOrder = [
+    'develop',
+    'origin/develop',
+    'development',
+    'origin/development',
+    'dev',
+    'origin/dev',
+    'main',
+    'origin/main',
+    'master',
+    'origin/master'
+  ];
+
+  for (const name of preferredOrder) {
+    if (branches.includes(name)) return name;
+  }
+  return branches[0];
+}
+
 export async function getRepoRoot(repoPath) {
   const git = simpleGit(repoPath);
   return await git.revparse(['--show-toplevel']);
@@ -13,8 +34,15 @@ export async function getCurrentBranch(repoPath) {
 
 export async function getBaseBranches(repoPath) {
   const git = simpleGit(repoPath);
-  // Get all branches and filter for common base branches
+  // Get all branches and normalize remote names (e.g. remotes/origin/main -> origin/main)
   const branches = await git.branch(['-a']);
+  const normalizedBranches = new Set(
+    branches.all
+      .map(b => b.trim())
+      .map(b => b.replace(/^\*\s*/, ''))
+      .map(b => b.split(' -> ')[0])
+      .map(b => b.replace(/^remotes\//, ''))
+  );
   const baseBranches = [];
 
   // Check for common base branch names
@@ -22,11 +50,11 @@ export async function getBaseBranches(repoPath) {
 
   for (const branchName of commonBaseBranches) {
     // Check local branches
-    if (branches.all.includes(branchName)) {
+    if (normalizedBranches.has(branchName)) {
       baseBranches.push(branchName);
     }
     // Check remote branches
-    if (branches.all.includes(`origin/${branchName}`)) {
+    if (normalizedBranches.has(`origin/${branchName}`)) {
       baseBranches.push(`origin/${branchName}`);
     }
   }
@@ -49,20 +77,30 @@ export async function listCommittedChanges(repoPath, baseBranch = 'main') {
   const root = await getRepoRoot(repoPath);
 
   try {
+    let effectiveBaseBranch = baseBranch;
+    if (!effectiveBaseBranch) {
+      const baseBranches = await getBaseBranches(repoPath);
+      effectiveBaseBranch = pickPreferredBaseBranch(baseBranches) || 'HEAD~1';
+    }
+
     // Get the current branch
     const currentBranch = await getCurrentBranch(repoPath);
 
     // If we're on the base branch, return empty array
-    if (currentBranch === baseBranch || currentBranch === baseBranch.replace('origin/', '')) {
+    if (effectiveBaseBranch !== 'HEAD~1' && (currentBranch === effectiveBaseBranch || currentBranch === effectiveBaseBranch.replace('origin/', ''))) {
       return [];
     }
 
     // Get files changed between base branch and current branch
-    const diffOutput = await git.diff([`${baseBranch}...HEAD`, '--name-status', '--diff-filter=ACMRTD']);
+    const compareRef = effectiveBaseBranch === 'HEAD~1' ? 'HEAD~1...HEAD' : `${effectiveBaseBranch}...HEAD`;
+    const diffOutput = await git.diff([compareRef, '--name-status', '--diff-filter=ACMRTD']);
     return parseDiffOutput(diffOutput);
   } catch (error) {
     // If base branch doesn't exist, try with origin/ prefix or fall back to HEAD~1
     try {
+      if (!baseBranch) {
+        throw new Error('No base branch available');
+      }
       const fallbackBase = baseBranch.startsWith('origin/') ? baseBranch.slice(7) : `origin/${baseBranch}`;
       const diffOutput = await git.diff([`${fallbackBase}...HEAD`, '--name-status', '--diff-filter=ACMRTD']);
       return parseDiffOutput(diffOutput);
@@ -170,6 +208,6 @@ function parseDiffOutput(diffOutput) {
   }
 
   return result;
-}export async function fileStat(absPath) {
+} export async function fileStat(absPath) {
   try { return await fs.stat(absPath); } catch { return null; }
 }

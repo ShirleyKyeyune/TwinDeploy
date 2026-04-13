@@ -43,7 +43,7 @@ export default function App() {
   const [repoPath, setRepoPath] = useState('');
   const [mode, setMode] = useState('staged'); // 'changed' | 'staged' | 'committed'
   const [baseRef, setBaseRef] = useState('HEAD~1');
-  const [baseBranch, setBaseBranch] = useState('main'); // For committed changes mode
+  const [baseBranch, setBaseBranch] = useState(''); // For committed changes mode
   const [availableBranches, setAvailableBranches] = useState([]);
   const [currentBranch, setCurrentBranch] = useState('');
   const [diff, setDiff] = useState([]);
@@ -83,6 +83,27 @@ export default function App() {
   const [folderPickerPath, setFolderPickerPath] = useState('');
   const [folderPickerData, setFolderPickerData] = useState(null);
   const [folderPickerLoading, setFolderPickerLoading] = useState(false);
+
+  function pickPreferredBaseBranch(branches) {
+    if (!branches?.length) return '';
+    const preferredOrder = [
+      'develop',
+      'origin/develop',
+      'development',
+      'origin/development',
+      'dev',
+      'origin/dev',
+      'main',
+      'origin/main',
+      'master',
+      'origin/master'
+    ];
+
+    for (const branch of preferredOrder) {
+      if (branches.includes(branch)) return branch;
+    }
+    return branches[0];
+  }
 
   useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
   useEffect(() => { listTargets().then(setTargets); }, []);
@@ -160,12 +181,16 @@ export default function App() {
     if (!repoPath) return;
     try {
       const res = await getBranches(repoPath);
-      setAvailableBranches(res.baseBranches || []);
+      const branches = Array.from(new Set(res.baseBranches || []));
+      setAvailableBranches(branches);
       setCurrentBranch(res.currentBranch || '');
-      // Set default base branch if none selected
-      if (!baseBranch && res.baseBranches.length > 0) {
-        setBaseBranch(res.baseBranches[0]);
-      }
+
+      // Keep the selected value valid so UI label and API request always match.
+      setBaseBranch(prev => {
+        if (branches.length === 0) return '';
+        if (prev && branches.includes(prev)) return prev;
+        return pickPreferredBaseBranch(branches);
+      });
     } catch (e) {
       console.error('Failed to load branches:', e);
     }
@@ -850,7 +875,7 @@ export default function App() {
               {availableBranches.map(branch => (
                 <option key={branch} value={branch}>{branch}</option>
               ))}
-              {availableBranches.length === 0 && <option value="main">main</option>}
+              {availableBranches.length === 0 && <option value="">no branches</option>}
             </select>
             <button className="btn primary" onClick={scan}>Scan</button>
           </div>
