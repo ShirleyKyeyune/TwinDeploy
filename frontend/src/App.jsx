@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, startDeploy, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile, browseDirectory } from './api';
 
+const LAST_REPO_STORAGE_KEY = 'twindeploy.lastRepoPath';
+const RECENT_REPOS_STORAGE_KEY = 'twindeploy.recentRepoPaths';
+const MAX_RECENT_REPOS = 10;
+
 // Helper to read SSE from a fetch Response (Safari-friendly)
 class EventSourcePoly {
   constructor(response) { this.response = response; this.listeners = {}; this._pump(); }
@@ -40,7 +44,22 @@ function formatFileSize(bytes) {
 
 export default function App() {
   const version = "1.0.0"; // TwinDeploy version
-  const [repoPath, setRepoPath] = useState('');
+  const [repoPath, setRepoPath] = useState(() => {
+    try {
+      return localStorage.getItem(LAST_REPO_STORAGE_KEY) || '';
+    } catch {
+      return '';
+    }
+  });
+  const [recentRepos, setRecentRepos] = useState(() => {
+    try {
+      const raw = localStorage.getItem(RECENT_REPOS_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  });
   const [mode, setMode] = useState('staged'); // 'changed' | 'staged' | 'committed'
   const [baseRef, setBaseRef] = useState('HEAD~1');
   const [baseBranch, setBaseBranch] = useState(''); // For committed changes mode
@@ -83,6 +102,8 @@ export default function App() {
   const [folderPickerPath, setFolderPickerPath] = useState('');
   const [folderPickerData, setFolderPickerData] = useState(null);
   const [folderPickerLoading, setFolderPickerLoading] = useState(false);
+  const [queuePanelMode, setQueuePanelMode] = useState('default'); // 'collapsed' | 'default' | 'expanded'
+  const [logPanelMode, setLogPanelMode] = useState('default'); // 'collapsed' | 'default' | 'expanded'
 
   function pickPreferredBaseBranch(branches) {
     if (!branches?.length) return '';
@@ -105,8 +126,38 @@ export default function App() {
     return branches[0];
   }
 
+  function rememberRepoPath(path) {
+    const trimmed = (path || '').trim();
+    if (!trimmed) return;
+
+    setRecentRepos(prev => {
+      const updated = [trimmed, ...prev.filter(p => p !== trimmed)].slice(0, MAX_RECENT_REPOS);
+      try {
+        localStorage.setItem(LAST_REPO_STORAGE_KEY, trimmed);
+        localStorage.setItem(RECENT_REPOS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {
+        // Ignore storage errors silently.
+      }
+      return updated;
+    });
+  }
+
+  function clearRecentRepos() {
+    setRecentRepos([]);
+    try {
+      localStorage.removeItem(RECENT_REPOS_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors silently.
+    }
+  }
+
   useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
   useEffect(() => { listTargets().then(setTargets); }, []);
+  useEffect(() => {
+    if (!repoPath && recentRepos.length > 0) {
+      setRepoPath(recentRepos[0]);
+    }
+  }, [repoPath, recentRepos]);
   useEffect(() => { loadBranches(); }, [repoPath]);
 
   const selectedFiles = useMemo(() => {
@@ -174,6 +225,7 @@ export default function App() {
 
   function selectFolder(path) {
     setRepoPath(path);
+    rememberRepoPath(path);
     setShowFolderPicker(false);
   }
 
@@ -184,6 +236,7 @@ export default function App() {
       const branches = Array.from(new Set(res.baseBranches || []));
       setAvailableBranches(branches);
       setCurrentBranch(res.currentBranch || '');
+      rememberRepoPath(repoPath);
 
       // Keep the selected value valid so UI label and API request always match.
       setBaseBranch(prev => {
@@ -207,6 +260,7 @@ export default function App() {
       res = await getStaged(repoPath);
     }
     const items = res.items || []; setDiff(items);
+    rememberRepoPath(repoPath);
   }
 
   function toggleAll(v) { const m = {}; diff.forEach(x => m[x.path] = v); setSel(m); }
@@ -866,6 +920,26 @@ export default function App() {
             <input value={repoPath} onChange={e => setRepoPath(e.target.value)} placeholder="/absolute/path/to/repo" style={{ flex: 1 }} />
             <button className="btn" onClick={openFolderPicker} title="Browse for folder">📁 Browse</button>
           </div>
+          {recentRepos.length > 0 && (
+            <div className="row tight">
+              <select
+                value={recentRepos.includes(repoPath) ? repoPath : ''}
+                onChange={e => {
+                  if (!e.target.value) return;
+                  setRepoPath(e.target.value);
+                  rememberRepoPath(e.target.value);
+                }}
+                style={{ flex: 1 }}
+                title="Select from recent repositories"
+              >
+                <option value="">Recent repositories</option>
+                {recentRepos.map(path => (
+                  <option key={path} value={path}>{path}</option>
+                ))}
+              </select>
+              <button className="btn sm" onClick={clearRecentRepos} title="Clear saved recent repositories">Clear Recent</button>
+            </div>
+          )}
           <div className="row tight">
             <label className="radio"><input type="radio" checked={mode === 'changed'} onChange={() => setMode('changed')} /> Changed since</label>
             <input value={baseRef} onChange={e => setBaseRef(e.target.value)} style={{ width: 140 }} disabled={mode !== 'changed'} />
@@ -1000,7 +1074,32 @@ export default function App() {
             </div>
           )}
         </section>        <section className="panel wide">
-          <h3>File Queue & Deployment Progress <span className="badge">{selectedFiles.length}</span></h3>
+          <div className="section-header-row">
+            <h3>File Queue & Deployment Progress <span className="badge">{selectedFiles.length}</span></h3>
+            <div className="panel-size-controls">
+              <button
+                className={`btn sm ${queuePanelMode === 'collapsed' ? 'active' : ''}`}
+                onClick={() => setQueuePanelMode('collapsed')}
+                title="Collapse queue and progress list"
+              >
+                Collapse
+              </button>
+              <button
+                className={`btn sm ${queuePanelMode === 'default' ? 'active' : ''}`}
+                onClick={() => setQueuePanelMode('default')}
+                title="Use default limited height"
+              >
+                Default
+              </button>
+              <button
+                className={`btn sm ${queuePanelMode === 'expanded' ? 'active' : ''}`}
+                onClick={() => setQueuePanelMode('expanded')}
+                title="Expand to show full list"
+              >
+                Expand Full
+              </button>
+            </div>
+          </div>
 
           {/* Deployment Progress Display (only shown during deployment) */}
           {deploymentActive && (
@@ -1014,122 +1113,124 @@ export default function App() {
             </div>
           )}
 
-          <div className={`queue-container ${deploymentActive ? 'deployment-active' : ''}`}>
-            {/* File Queue */}
-            <div className="queue-section">
-              <h4>Queue {deploymentActive ? '(Pending)' : ''}</h4>
-              {selectedFiles.length > 0 && targetId ? (
-                <div className="file-queue">
-                  <div className="queue-header">
-                    <div>Source Path</div>
-                    <div></div>
-                    <div>Destination Path</div>
-                  </div>
-                  {selectedFiles.map(fileInfo => {
-                    const path = fileInfo.path || fileInfo; // backward compatibility
-                    const selectedTarget = targets.find(t => t.id === targetId);
-                    let destinationRoot = remotePath || '/';
-                    if (!showRemoteBrowser && selectedTarget?.remoteRoot && selectedTarget.remoteRoot.trim()) {
-                      destinationRoot = selectedTarget.remoteRoot;
-                    }
-                    const relativePath = destinationRoot === '/' ?
-                      `/${path}` :
-                      `${destinationRoot.replace(/\/+$/, '')}/${path}`;
-                    const hostPrefix = selectedTarget ? `${selectedTarget.host}:` : '';
-                    const fullDestPath = `${hostPrefix}${relativePath}`;
-
-                    // Determine status for styling
-                    const isCompleted = deploymentProgress.completed.includes(path);
-                    const isFailed = deploymentProgress.failed.includes(path);
-                    const isCurrent = deploymentProgress.current === path;
-
-                    // Show action indicator
-                    const actionIcon = fileInfo.action === 'delete' ? '🗑️' : '📤';
-
-                    // Special handling for rename operations
-                    let displayText = path;
-                    let destinationText = fileInfo.action === 'delete' ? '(will be deleted)' : fullDestPath;
-
-                    if (fileInfo.isRenameOperation) {
-                      if (fileInfo.action === 'delete') {
-                        displayText = `${path}`;
-                        destinationText = `(delete old file for rename to ${fileInfo.renameTo})`;
-                      } else if (fileInfo.action === 'upload') {
-                        displayText = `${path}`;
-                        destinationText = `${fullDestPath} (upload new file from rename of ${fileInfo.renameFrom})`;
+          <div className={`queue-resize-panel ${queuePanelMode}`}>
+            <div className={`queue-container ${deploymentActive ? 'deployment-active' : ''}`}>
+              {/* File Queue */}
+              <div className="queue-section">
+                <h4>Queue {deploymentActive ? '(Pending)' : ''}</h4>
+                {selectedFiles.length > 0 && targetId ? (
+                  <div className="file-queue">
+                    <div className="queue-header">
+                      <div>Source Path</div>
+                      <div></div>
+                      <div>Destination Path</div>
+                    </div>
+                    {selectedFiles.map(fileInfo => {
+                      const path = fileInfo.path || fileInfo; // backward compatibility
+                      const selectedTarget = targets.find(t => t.id === targetId);
+                      let destinationRoot = remotePath || '/';
+                      if (!showRemoteBrowser && selectedTarget?.remoteRoot && selectedTarget.remoteRoot.trim()) {
+                        destinationRoot = selectedTarget.remoteRoot;
                       }
-                    }
+                      const relativePath = destinationRoot === '/' ?
+                        `/${path}` :
+                        `${destinationRoot.replace(/\/+$/, '')}/${path}`;
+                      const hostPrefix = selectedTarget ? `${selectedTarget.host}:` : '';
+                      const fullDestPath = `${hostPrefix}${relativePath}`;
 
-                    return (
-                      <div key={`${path}-${fileInfo.action}`} className={`queue-item ${isCompleted ? 'completed' : ''} ${isFailed ? 'failed' : ''} ${isCurrent ? 'current' : ''}`}>
-                        <div className="source-path mono" title={`${repoPath}/${path}`}>
-                          {actionIcon} {displayText}
-                          {isCompleted && <span className="status-icon">✅</span>}
-                          {isFailed && <span className="status-icon">❌</span>}
-                          {isCurrent && <span className="status-icon">⏳</span>}
-                        </div>
-                        <div className="arrow">→</div>
-                        <div className="dest-path mono" title={fullDestPath}>
-                          {destinationText}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="empty">
-                  {selectedFiles.length === 0 ? 'No files selected.' : 'Select a target to see destination paths.'}
-                </div>
-              )}
-            </div>
+                      // Determine status for styling
+                      const isCompleted = deploymentProgress.completed.includes(path);
+                      const isFailed = deploymentProgress.failed.includes(path);
+                      const isCurrent = deploymentProgress.current === path;
 
-            {/* Deployment Progress (only shown during deployment) */}
-            {deploymentActive && (
-              <div className="progress-section">
-                <h4>Transfer Progress</h4>
+                      // Show action indicator
+                      const actionIcon = fileInfo.action === 'delete' ? '🗑️' : '📤';
 
-                {/* Completed Files */}
-                {deploymentProgress.completed.length > 0 && (
-                  <div className="progress-group completed">
-                    <h5>✅ Completed ({deploymentProgress.completed.length})</h5>
-                    <div className="progress-list">
-                      {deploymentProgress.completed.map(file => (
-                        <div key={file} className="progress-item completed">
-                          <span className="progress-file mono">{file}</span>
-                          <span className="progress-status">✅</span>
+                      // Special handling for rename operations
+                      let displayText = path;
+                      let destinationText = fileInfo.action === 'delete' ? '(will be deleted)' : fullDestPath;
+
+                      if (fileInfo.isRenameOperation) {
+                        if (fileInfo.action === 'delete') {
+                          displayText = `${path}`;
+                          destinationText = `(delete old file for rename to ${fileInfo.renameTo})`;
+                        } else if (fileInfo.action === 'upload') {
+                          displayText = `${path}`;
+                          destinationText = `${fullDestPath} (upload new file from rename of ${fileInfo.renameFrom})`;
+                        }
+                      }
+
+                      return (
+                        <div key={`${path}-${fileInfo.action}`} className={`queue-item ${isCompleted ? 'completed' : ''} ${isFailed ? 'failed' : ''} ${isCurrent ? 'current' : ''}`}>
+                          <div className="source-path mono" title={`${repoPath}/${path}`}>
+                            {actionIcon} {displayText}
+                            {isCompleted && <span className="status-icon">✅</span>}
+                            {isFailed && <span className="status-icon">❌</span>}
+                            {isCurrent && <span className="status-icon">⏳</span>}
+                          </div>
+                          <div className="arrow">→</div>
+                          <div className="dest-path mono" title={fullDestPath}>
+                            {destinationText}
+                          </div>
                         </div>
-                      ))}
-                    </div>
+                      );
+                    })}
                   </div>
-                )}
-
-                {/* Current File */}
-                {deploymentProgress.current && (
-                  <div className="progress-group current">
-                    <h5>⏳ Transferring</h5>
-                    <div className="progress-item current">
-                      <span className="progress-file mono">{deploymentProgress.current}</span>
-                      <span className="progress-status">⏳</span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Failed Files */}
-                {deploymentProgress.failed.length > 0 && (
-                  <div className="progress-group failed">
-                    <h5>❌ Failed ({deploymentProgress.failed.length})</h5>
-                    <div className="progress-list">
-                      {deploymentProgress.failed.map(file => (
-                        <div key={file} className="progress-item failed">
-                          <span className="progress-file mono">{file}</span>
-                          <span className="progress-status">❌</span>
-                        </div>
-                      ))}
-                    </div>
+                ) : (
+                  <div className="empty">
+                    {selectedFiles.length === 0 ? 'No files selected.' : 'Select a target to see destination paths.'}
                   </div>
                 )}
               </div>
-            )}
+
+              {/* Deployment Progress (only shown during deployment) */}
+              {deploymentActive && (
+                <div className="progress-section">
+                  <h4>Transfer Progress</h4>
+
+                  {/* Completed Files */}
+                  {deploymentProgress.completed.length > 0 && (
+                    <div className="progress-group completed">
+                      <h5>✅ Completed ({deploymentProgress.completed.length})</h5>
+                      <div className="progress-list">
+                        {deploymentProgress.completed.map(file => (
+                          <div key={file} className="progress-item completed">
+                            <span className="progress-file mono">{file}</span>
+                            <span className="progress-status">✅</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Current File */}
+                  {deploymentProgress.current && (
+                    <div className="progress-group current">
+                      <h5>⏳ Transferring</h5>
+                      <div className="progress-item current">
+                        <span className="progress-file mono">{deploymentProgress.current}</span>
+                        <span className="progress-status">⏳</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Failed Files */}
+                  {deploymentProgress.failed.length > 0 && (
+                    <div className="progress-group failed">
+                      <h5>❌ Failed ({deploymentProgress.failed.length})</h5>
+                      <div className="progress-list">
+                        {deploymentProgress.failed.map(file => (
+                          <div key={file} className="progress-item failed">
+                            <span className="progress-file mono">{file}</span>
+                            <span className="progress-status">❌</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Deploy Section */}
@@ -1171,9 +1272,36 @@ export default function App() {
         </section>
 
         <section className="panel wide">
-          <h3>5) Log</h3>
-          <div className="log">
-            {log.map((msg, i) => <div key={i}>{msg}</div>)}
+          <div className="section-header-row">
+            <h3>5) Log</h3>
+            <div className="panel-size-controls">
+              <button
+                className={`btn sm ${logPanelMode === 'collapsed' ? 'active' : ''}`}
+                onClick={() => setLogPanelMode('collapsed')}
+                title="Collapse log"
+              >
+                Collapse
+              </button>
+              <button
+                className={`btn sm ${logPanelMode === 'default' ? 'active' : ''}`}
+                onClick={() => setLogPanelMode('default')}
+                title="Use default limited height"
+              >
+                Default
+              </button>
+              <button
+                className={`btn sm ${logPanelMode === 'expanded' ? 'active' : ''}`}
+                onClick={() => setLogPanelMode('expanded')}
+                title="Expand to show full log"
+              >
+                Expand Full
+              </button>
+            </div>
+          </div>
+          <div className={`log-resize-panel ${logPanelMode}`}>
+            <div className="log">
+              {log.map((msg, i) => <div key={i}>{msg}</div>)}
+            </div>
           </div>
           <div className="row tight">
             <button className="btn sm" onClick={() => setLog([])}>Clear</button>

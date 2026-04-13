@@ -728,7 +728,8 @@ body.dark .tree-toggle:hover {
   padding: 12px;
   border-radius: 8px;
   overflow: auto;
-  max-height: 240px;
+  height: 100%;
+  max-height: none;
   line-height: 1.35;
   border: 1px solid #1f2937;
 }
@@ -755,6 +756,80 @@ body.dark .tree-toggle:hover {
 .tmsg {
   font-size: 11px;
   opacity: .7;
+}
+
+.section-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.section-header-row h3 {
+  margin-bottom: 0;
+}
+
+.panel-size-controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.panel-size-controls .btn.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+.queue-resize-panel {
+  min-height: 180px;
+  height: 320px;
+  max-height: 460px;
+  overflow: auto;
+  resize: vertical;
+}
+
+.queue-resize-panel.collapsed {
+  min-height: 0;
+  height: 0;
+  max-height: 0;
+  overflow: hidden;
+  resize: none;
+  margin-bottom: 10px;
+}
+
+.queue-resize-panel.expanded {
+  min-height: 220px;
+  height: auto;
+  max-height: none;
+  overflow: visible;
+  resize: none;
+}
+
+.log-resize-panel {
+  min-height: 140px;
+  height: 240px;
+  max-height: 420px;
+  overflow: auto;
+  resize: vertical;
+}
+
+.log-resize-panel.collapsed {
+  min-height: 0;
+  height: 0;
+  max-height: 0;
+  overflow: hidden;
+  resize: none;
+  margin-bottom: 10px;
+}
+
+.log-resize-panel.expanded {
+  min-height: 220px;
+  height: auto;
+  max-height: none;
+  overflow: visible;
+  resize: none;
 }
 
 /* File Queue - FileZilla Style */
