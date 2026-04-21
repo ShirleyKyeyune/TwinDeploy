@@ -61,6 +61,78 @@ app.get('/api/repo/branches', async (req, res) => {
     res.json({ baseBranches, currentBranch });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+app.get('/api/repo/files', async (req, res) => {
+  try {
+    const { repoPath, dirPath = '' } = req.query;
+    if (!repoPath) {
+      return res.status(400).json({ error: 'repoPath required' });
+    }
+
+    const repoRoot = path.resolve(await getRepoRoot(repoPath));
+    const safeDirPath = String(dirPath || '').replace(/^[/\\]+/, '');
+    const currentDir = path.resolve(repoRoot, safeDirPath);
+
+    if (currentDir !== repoRoot && !currentDir.startsWith(`${repoRoot}${path.sep}`)) {
+      return res.status(400).json({ error: 'Invalid directory path' });
+    }
+
+    const entries = await fs.readdir(currentDir, { withFileTypes: true });
+    const directories = [];
+    const files = [];
+
+    for (const entry of entries) {
+      if (entry.name === '.git') continue;
+
+      const absolutePath = path.join(currentDir, entry.name);
+      const relativePath = path.relative(repoRoot, absolutePath).split(path.sep).join('/');
+
+      if (entry.isDirectory()) {
+        directories.push({
+          name: entry.name,
+          path: relativePath
+        });
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+
+      let size = 0;
+      try {
+        const stat = await fs.stat(absolutePath);
+        size = stat.size;
+      } catch {
+        // Ignore stat failures and keep size at 0.
+      }
+
+      files.push({
+        name: entry.name,
+        path: relativePath,
+        size
+      });
+    }
+
+    directories.sort((a, b) => a.name.localeCompare(b.name));
+    files.sort((a, b) => a.name.localeCompare(b.name));
+
+    const currentPath = path.relative(repoRoot, currentDir).split(path.sep).join('/');
+    const parent = currentPath
+      ? (() => {
+        const parentPath = path.dirname(currentPath).split(path.sep).join('/');
+        return parentPath === '.' ? '' : parentPath;
+      })()
+      : null;
+
+    res.json({
+      root: repoRoot,
+      currentPath,
+      parent,
+      directories,
+      files
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
 
 // Local directory browsing for folder selection
 app.get('/api/browse', async (req, res) => {

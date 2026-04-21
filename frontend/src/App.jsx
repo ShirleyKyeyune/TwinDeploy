@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState, useRef } from 'react';
-import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, startDeploy, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile, browseDirectory } from './api';
+import React, { useEffect, useMemo, useState } from 'react';
+import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile, browseDirectory, listRepoFiles } from './api';
 
 const LAST_REPO_STORAGE_KEY = 'twindeploy.lastRepoPath';
 const RECENT_REPOS_STORAGE_KEY = 'twindeploy.recentRepoPaths';
@@ -42,6 +42,78 @@ function formatFileSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+function buildManualFileEntry(path, overrides = {}) {
+  const normalizedPath = String(path || '').trim().replace(/^\.\/+/, '').replace(/\\/g, '/');
+  return {
+    path: normalizedPath,
+    name: normalizedPath.split('/').pop(),
+    status: 'manual',
+    action: 'upload',
+    source: 'manual',
+    ...overrides
+  };
+}
+
+function parsePastedFileList(input) {
+  const entries = [];
+  const invalidLines = [];
+  const lines = String(input || '').split('\n');
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const renameMatch = line.match(/^R\d*\s+(.+?)\s+(?:->\s+)?(.+)$/);
+    if (renameMatch) {
+      const oldPath = renameMatch[1].trim();
+      const newPath = renameMatch[2].trim();
+      if (!oldPath || !newPath) {
+        invalidLines.push(rawLine);
+        continue;
+      }
+      entries.push(buildManualFileEntry(newPath, {
+        oldPath: oldPath.replace(/^\.\/+/, '').replace(/\\/g, '/'),
+        status: 'renamed',
+        action: 'rename'
+      }));
+      continue;
+    }
+
+    const statusMatch = line.match(/^([A-Z?]{1,2})\s+(.+)$/);
+    if (!statusMatch) {
+      entries.push(buildManualFileEntry(line));
+      continue;
+    }
+
+    const [, statusToken, rawPath] = statusMatch;
+    const normalizedStatus = statusToken.replace(/\?/g, '');
+    const path = rawPath.trim();
+    if (!path) {
+      invalidLines.push(rawLine);
+      continue;
+    }
+
+    const statusMap = {
+      A: { status: 'added', action: 'upload' },
+      M: { status: 'modified', action: 'upload' },
+      D: { status: 'deleted', action: 'delete' },
+      T: { status: 'type_changed', action: 'upload' },
+      C: { status: 'copied', action: 'upload' },
+      U: { status: 'manual', action: 'upload' }
+    };
+
+    const resolved = statusMap[normalizedStatus] || statusMap[normalizedStatus.slice(-1)];
+    if (!resolved) {
+      entries.push(buildManualFileEntry(path));
+      continue;
+    }
+
+    entries.push(buildManualFileEntry(path, resolved));
+  }
+
+  return { entries, invalidLines };
+}
+
 export default function App() {
   const version = "1.0.0"; // TwinDeploy version
   const [repoPath, setRepoPath] = useState(() => {
@@ -68,6 +140,7 @@ export default function App() {
   const [currentBranch, setCurrentBranch] = useState('');
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [diff, setDiff] = useState([]);
+  const [manualFiles, setManualFiles] = useState([]);
   const [sel, setSel] = useState({});
   const [targets, setTargets] = useState([]);
   const [targetId, setTargetId] = useState('');
@@ -104,6 +177,13 @@ export default function App() {
   const [folderPickerPath, setFolderPickerPath] = useState('');
   const [folderPickerData, setFolderPickerData] = useState(null);
   const [folderPickerLoading, setFolderPickerLoading] = useState(false);
+  const [showManualFilePicker, setShowManualFilePicker] = useState(false);
+  const [manualPickerMode, setManualPickerMode] = useState('browse');
+  const [manualFilePickerPath, setManualFilePickerPath] = useState('');
+  const [manualFilePickerData, setManualFilePickerData] = useState(null);
+  const [manualFilePickerLoading, setManualFilePickerLoading] = useState(false);
+  const [manualPickerSelection, setManualPickerSelection] = useState({});
+  const [manualPasteValue, setManualPasteValue] = useState('');
   const [queuePanelMode, setQueuePanelMode] = useState('default'); // 'collapsed' | 'default' | 'expanded'
   const [logPanelMode, setLogPanelMode] = useState('default'); // 'collapsed' | 'default' | 'expanded'
 
@@ -161,13 +241,38 @@ export default function App() {
     }
   }, [repoPath, recentRepos]);
   useEffect(() => { loadBranches(); }, [repoPath]);
+  useEffect(() => {
+    setDiff([]);
+    setSel({});
+    setExpandedFolders({});
+    setManualFiles([]);
+    setManualPickerSelection({});
+    setManualPickerMode('browse');
+    setManualFilePickerData(null);
+    setManualFilePickerPath('');
+    setManualPasteValue('');
+    setShowManualFilePicker(false);
+  }, [repoPath]);
+
+  const availableFiles = useMemo(() => {
+    const byPath = new Map();
+    diff.forEach(fileInfo => {
+      byPath.set(fileInfo.path, fileInfo);
+    });
+    manualFiles.forEach(fileInfo => {
+      if (!byPath.has(fileInfo.path)) {
+        byPath.set(fileInfo.path, fileInfo);
+      }
+    });
+    return Array.from(byPath.values());
+  }, [diff, manualFiles]);
 
   const selectedFiles = useMemo(() => {
     const selectedPaths = Object.keys(sel).filter(k => sel[k]);
     const result = [];
 
     selectedPaths.forEach(path => {
-      const fileInfo = diff.find(f => f.path === path);
+      const fileInfo = availableFiles.find(f => f.path === path);
       if (!fileInfo) {
         // Fallback for backward compatibility
         result.push({ path, action: 'upload' });
@@ -196,7 +301,20 @@ export default function App() {
     });
 
     return result;
-  }, [sel, diff]);
+  }, [sel, availableFiles]);
+
+  const manualPickerSelectedCount = useMemo(
+    () => Object.values(manualPickerSelection).filter(Boolean).length,
+    [manualPickerSelection]
+  );
+  const parsedManualPaste = useMemo(
+    () => parsePastedFileList(manualPasteValue),
+    [manualPasteValue]
+  );
+
+  function setFileSelected(path, value) {
+    setSel(prev => ({ ...prev, [path]: value }));
+  }
 
   async function openFolderPicker() {
     setShowFolderPicker(true);
@@ -231,6 +349,101 @@ export default function App() {
     setShowFolderPicker(false);
   }
 
+  async function openManualFilePicker() {
+    if (!repoPath) {
+      alert('Select a repository first.');
+      return;
+    }
+    setShowManualFilePicker(true);
+    setManualPickerMode('browse');
+    setManualPickerSelection({});
+    setManualPasteValue('');
+    await loadManualFilePicker('');
+  }
+
+  async function loadManualFilePicker(dirPath = '') {
+    if (!repoPath) return;
+    setManualFilePickerLoading(true);
+    try {
+      const data = await listRepoFiles(repoPath, dirPath);
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      setManualFilePickerData(data);
+      setManualFilePickerPath(data.currentPath);
+    } catch (e) {
+      alert('Failed to browse repository files: ' + e.message);
+    } finally {
+      setManualFilePickerLoading(false);
+    }
+  }
+
+  function toggleManualPickerFile(path, value) {
+    setManualPickerSelection(prev => ({ ...prev, [path]: value }));
+  }
+
+  function addManualEntriesToList(entries) {
+    if (!entries.length) {
+      return;
+    }
+
+    const dedupedEntries = Array.from(
+      new Map(entries.map(entry => [entry.path, entry])).values()
+    );
+    const existingPaths = new Set(availableFiles.map(fileInfo => fileInfo.path));
+    const additions = dedupedEntries.filter(entry => !existingPaths.has(entry.path));
+
+    if (additions.length > 0) {
+      setManualFiles(prev => [...prev, ...additions]);
+    }
+
+    setSel(prev => {
+      const next = { ...prev };
+      dedupedEntries.forEach(entry => {
+        next[entry.path] = true;
+      });
+      return next;
+    });
+  }
+
+  function addManualFilesToList() {
+    const selectedEntries = Object.keys(manualPickerSelection)
+      .filter(path => manualPickerSelection[path])
+      .map(path => buildManualFileEntry(path));
+    if (selectedEntries.length === 0) {
+      return;
+    }
+
+    addManualEntriesToList(selectedEntries);
+    setManualPickerSelection({});
+    setShowManualFilePicker(false);
+  }
+
+  function addPastedFilesToList() {
+    if (parsedManualPaste.entries.length === 0) {
+      return;
+    }
+
+    addManualEntriesToList(parsedManualPaste.entries);
+    setManualPasteValue('');
+    setShowManualFilePicker(false);
+  }
+
+  function clearManualFiles() {
+    const manualPaths = new Set(manualFiles.map(fileInfo => fileInfo.path));
+    const gitPaths = new Set(diff.map(fileInfo => fileInfo.path));
+    setManualFiles([]);
+    setSel(prev => {
+      const next = { ...prev };
+      manualPaths.forEach(path => {
+        if (!gitPaths.has(path)) {
+          delete next[path];
+        }
+      });
+      return next;
+    });
+  }
+
   async function loadBranches(options = {}) {
     if (!repoPath) return;
     const { refreshCommittedDiff = false } = options;
@@ -253,7 +466,6 @@ export default function App() {
 
       if (refreshCommittedDiff && mode === 'committed') {
         setDiff([]);
-        setSel({});
         const committed = await getCommitted(repoPath, nextBaseBranch, committedCompareMode);
         setDiff(committed.items || []);
       }
@@ -269,7 +481,7 @@ export default function App() {
   }
 
   async function scan() {
-    setDiff([]); setSel({});
+    setDiff([]);
     let res;
     if (mode === 'changed') {
       res = await getChanged(repoPath, baseRef);
@@ -282,7 +494,13 @@ export default function App() {
     rememberRepoPath(repoPath);
   }
 
-  function toggleAll(v) { const m = {}; diff.forEach(x => m[x.path] = v); setSel(m); }
+  function toggleAll(v) {
+    const next = {};
+    availableFiles.forEach(fileInfo => {
+      next[fileInfo.path] = v;
+    });
+    setSel(next);
+  }
 
   // Build tree structure from flat file list
   function buildFileTree(files) {
@@ -682,6 +900,35 @@ export default function App() {
     });
   }
 
+  function renderFileDetails(fileInfo, { compactName = false } = {}) {
+    const path = fileInfo.path || fileInfo;
+
+    return (
+      <div className="file-info">
+        {compactName && <span className="file-icon">📄</span>}
+        <span className="mono file-path">{compactName ? (fileInfo.name || path.split('/').pop()) : path}</span>
+        {fileInfo.status && (
+          <span className={`status-badge ${fileInfo.status}`}>
+            {fileInfo.status === 'renamed' && fileInfo.oldPath ? `${fileInfo.status} from ${fileInfo.oldPath}` : fileInfo.status}
+          </span>
+        )}
+        {fileInfo.action && (
+          <span className={`action-badge ${fileInfo.action}`}>
+            {fileInfo.action === 'delete' ? '🗑️' :
+              fileInfo.action === 'rename' ? '📝🗑️📤' :
+                fileInfo.action === 'upload' ? '📤' : ''}
+          </span>
+        )}
+        {fileInfo.status === 'renamed' && fileInfo.oldPath && (
+          <div className="rename-operations">
+            <span className="rename-op delete">🗑️ Delete: {fileInfo.oldPath}</span>
+            <span className="rename-op upload">📤 Upload: {path}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // Render tree view recursively
   function renderTreeFolder(folder, depth = 0) {
     const hasChildren = Object.keys(folder.children).length > 0 || folder.files.length > 0;
@@ -736,30 +983,9 @@ export default function App() {
                     <input
                       type="checkbox"
                       checked={!!sel[path]}
-                      onChange={e => setSel({ ...sel, [path]: e.target.checked })}
+                      onChange={e => setFileSelected(path, e.target.checked)}
                     />
-                    <span className="file-info">
-                      <span className="file-icon">📄</span>
-                      <span className="mono file-path">{fileInfo.name || path.split('/').pop()}</span>
-                      {fileInfo.status && (
-                        <span className={`status-badge ${fileInfo.status}`}>
-                          {fileInfo.status === 'renamed' && fileInfo.oldPath ? `${fileInfo.status} from ${fileInfo.oldPath}` : fileInfo.status}
-                        </span>
-                      )}
-                      {fileInfo.action && (
-                        <span className={`action-badge ${fileInfo.action}`}>
-                          {fileInfo.action === 'delete' ? '🗑️' :
-                            fileInfo.action === 'rename' ? '📝🗑️📤' :
-                              fileInfo.action === 'upload' ? '📤' : ''}
-                        </span>
-                      )}
-                      {fileInfo.status === 'renamed' && fileInfo.oldPath && (
-                        <div className="rename-operations">
-                          <span className="rename-op delete">🗑️ Delete: {fileInfo.oldPath}</span>
-                          <span className="rename-op upload">📤 Upload: {path}</span>
-                        </div>
-                      )}
-                    </span>
+                    {renderFileDetails(fileInfo, { compactName: true })}
                   </label>
                 </div>
               );
@@ -770,7 +996,7 @@ export default function App() {
     );
   }
 
-  const fileTree = useMemo(() => buildFileTree(diff), [diff]);
+  const fileTree = useMemo(() => buildFileTree(availableFiles), [availableFiles]);
   return (
     <div className="wrap">
       <header className="app-header">
@@ -990,7 +1216,7 @@ export default function App() {
         </section>
 
         <section className="panel files-panel">
-          <h3>4) Files <span className="badge">{selectedFiles.length}/{diff.length}</span></h3>
+          <h3>4) Files <span className="badge">{selectedFiles.length}/{availableFiles.length}</span></h3>
           <div className="toolbar">
             <div className="view-toggle">
               <button
@@ -1007,6 +1233,12 @@ export default function App() {
               </button>
             </div>
             <div className="selection-actions">
+              <button className="btn sm" onClick={openManualFilePicker} disabled={!repoPath}>Add Files</button>
+              {manualFiles.length > 0 && (
+                <button className="btn sm" onClick={clearManualFiles}>
+                  Clear Manual ({manualFiles.length})
+                </button>
+              )}
               <button className="btn sm" onClick={() => toggleAll(true)}>All</button>
               <button className="btn sm" onClick={() => toggleAll(false)}>None</button>
               {fileViewMode === 'tree' && (
@@ -1025,40 +1257,25 @@ export default function App() {
               )}
             </div>
           </div>
+          {manualFiles.length > 0 && (
+            <div className="hint">
+              {manualFiles.length} manually added file{manualFiles.length === 1 ? '' : 's'} will stay in the queue until cleared.
+            </div>
+          )}
 
           {fileViewMode === 'list' ? (
             <div className="list files">
-              {diff.map(it => (
+              {availableFiles.map(it => (
                 <label key={it.path} className={`file-item ${sel[it.path] ? 'on' : ''} ${it.status || ''}`}>
-                  <input type="checkbox" checked={!!sel[it.path]} onChange={e => setSel({ ...sel, [it.path]: e.target.checked })} />
-                  <span className="file-info">
-                    <span className="mono file-path">{it.path}</span>
-                    {it.status && (
-                      <span className={`status-badge ${it.status}`}>
-                        {it.status === 'renamed' && it.oldPath ? `${it.status} from ${it.oldPath}` : it.status}
-                      </span>
-                    )}
-                    {it.action && (
-                      <span className={`action-badge ${it.action}`}>
-                        {it.action === 'delete' ? '🗑️' :
-                          it.action === 'rename' ? '📝🗑️📤' :
-                            it.action === 'upload' ? '📤' : ''}
-                      </span>
-                    )}
-                    {it.status === 'renamed' && it.oldPath && (
-                      <div className="rename-operations">
-                        <span className="rename-op delete">🗑️ Delete: {it.oldPath}</span>
-                        <span className="rename-op upload">📤 Upload: {it.path}</span>
-                      </div>
-                    )}
-                  </span>
+                  <input type="checkbox" checked={!!sel[it.path]} onChange={e => setFileSelected(it.path, e.target.checked)} />
+                  {renderFileDetails(it)}
                 </label>
               ))}
-              {diff.length === 0 && <div className="empty">No results. Scan first.</div>}
+              {availableFiles.length === 0 && <div className="empty">No files yet. Run a scan or add files manually.</div>}
             </div>
           ) : (
             <div className="tree-view">
-              {diff.length > 0 ? (
+              {availableFiles.length > 0 ? (
                 <div className="tree-container">
                   {Object.values(fileTree.children)
                     .sort((a, b) => a.name.localeCompare(b.name))
@@ -1071,31 +1288,16 @@ export default function App() {
                           <input
                             type="checkbox"
                             checked={!!sel[path]}
-                            onChange={e => setSel({ ...sel, [path]: e.target.checked })}
+                            onChange={e => setFileSelected(path, e.target.checked)}
                           />
-                          <span className="file-info">
-                            <span className="file-icon">📄</span>
-                            <span className="mono file-path">{fileInfo.name || path}</span>
-                            {fileInfo.status && (
-                              <span className={`status-badge ${fileInfo.status}`}>
-                                {fileInfo.status === 'renamed' && fileInfo.oldPath ? `${fileInfo.status} from ${fileInfo.oldPath}` : fileInfo.status}
-                              </span>
-                            )}
-                            {fileInfo.action && (
-                              <span className={`action-badge ${fileInfo.action}`}>
-                                {fileInfo.action === 'delete' ? '🗑️' :
-                                  fileInfo.action === 'rename' ? '📝🗑️📤' :
-                                    fileInfo.action === 'upload' ? '📤' : ''}
-                              </span>
-                            )}
-                          </span>
+                          {renderFileDetails(fileInfo, { compactName: true })}
                         </label>
                       </div>
                     );
                   })}
                 </div>
               ) : (
-                <div className="empty">No results. Scan first.</div>
+                <div className="empty">No files yet. Run a scan or add files manually.</div>
               )}
             </div>
           )}
@@ -1475,6 +1677,138 @@ export default function App() {
             <div className="modal-footer">
               <div className="hint">
                 💡 Only Git repositories can be selected. Navigate through folders to find your repository.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manual File Picker Modal */}
+      {showManualFilePicker && (
+        <div className="modal-overlay" onClick={() => setShowManualFilePicker(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 760 }}>
+            <div className="modal-header">
+              <h3>➕ Add Repository Files</h3>
+              <button className="btn sm" onClick={() => setShowManualFilePicker(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div className="manual-picker-tabs">
+                <button
+                  className={`btn sm ${manualPickerMode === 'browse' ? 'active' : ''}`}
+                  onClick={() => setManualPickerMode('browse')}
+                >
+                  Browse
+                </button>
+                <button
+                  className={`btn sm ${manualPickerMode === 'paste' ? 'active' : ''}`}
+                  onClick={() => setManualPickerMode('paste')}
+                >
+                  Paste Paths
+                </button>
+              </div>
+
+              {manualPickerMode === 'browse' ? (
+                manualFilePickerLoading ? (
+                  <div style={{ padding: 20, textAlign: 'center' }}>Loading...</div>
+                ) : manualFilePickerData ? (
+                  <>
+                    <div className="folder-picker-path">
+                      <button
+                        className="btn sm"
+                        onClick={() => loadManualFilePicker(manualFilePickerData.parent || '')}
+                        disabled={manualFilePickerData.parent === null}
+                        title="Go to parent folder"
+                      >
+                        ⬆️ Up
+                      </button>
+                      <span className="mono" style={{ marginLeft: 10, fontSize: '0.9em' }}>
+                        {manualFilePickerPath ? `/${manualFilePickerPath}` : '/'}
+                      </span>
+                    </div>
+
+                    <div className="repo-picker-list">
+                      {manualFilePickerData.directories.map(dir => (
+                        <div key={dir.path} className="repo-picker-item folder">
+                          <button
+                            className="btn sm"
+                            onClick={() => loadManualFilePicker(dir.path)}
+                            title="Open folder"
+                          >
+                            📁
+                          </button>
+                          <button
+                            className="repo-picker-name-btn"
+                            onClick={() => loadManualFilePicker(dir.path)}
+                            title={dir.path}
+                          >
+                            {dir.name}
+                          </button>
+                          <span className="repo-picker-meta">Folder</span>
+                        </div>
+                      ))}
+
+                      {manualFilePickerData.files.map(file => {
+                        const alreadyQueued = availableFiles.some(fileInfo => fileInfo.path === file.path);
+                        return (
+                          <label key={file.path} className="repo-picker-item file">
+                            <input
+                              type="checkbox"
+                              checked={!!manualPickerSelection[file.path]}
+                              onChange={e => toggleManualPickerFile(file.path, e.target.checked)}
+                            />
+                            <span className="repo-picker-name mono" title={file.path}>{file.name}</span>
+                            <span className="repo-picker-meta">{formatFileSize(file.size || 0)}</span>
+                            {alreadyQueued && <span className="status-badge manual">in queue</span>}
+                          </label>
+                        );
+                      })}
+
+                      {manualFilePickerData.directories.length === 0 && manualFilePickerData.files.length === 0 && (
+                        <div className="empty">This folder is empty.</div>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)' }}>
+                    Failed to load repository files
+                  </div>
+                )
+              ) : (
+                <div className="manual-paste-panel">
+                  <textarea
+                    className="manual-paste-input"
+                    value={manualPasteValue}
+                    onChange={e => setManualPasteValue(e.target.value)}
+                    placeholder={`Paste file paths or Git status lines, for example:\nM  wp-content/plugins/cd-custom-dashboard/assets/js/script.js\nA  wp-content/plugins/app-specific-plugin-asp/Classes/Ajax/BouncedEmails/Handler.php`}
+                    spellCheck={false}
+                  />
+                  <div className="manual-paste-summary">
+                    <span>{parsedManualPaste.entries.length} parsed file{parsedManualPaste.entries.length === 1 ? '' : 's'}</span>
+                    {parsedManualPaste.invalidLines.length > 0 && (
+                      <span>{parsedManualPaste.invalidLines.length} invalid line{parsedManualPaste.invalidLines.length === 1 ? '' : 's'} ignored</span>
+                    )}
+                  </div>
+                  <div className="manual-paste-hint">
+                    Supports raw paths and Git-style prefixes like `M`, `A`, `D`, `T`, `C`, and `R100`.
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <div className="hint">
+                {manualPickerMode === 'browse'
+                  ? `${manualPickerSelectedCount} file${manualPickerSelectedCount === 1 ? '' : 's'} selected`
+                  : `${parsedManualPaste.entries.length} file${parsedManualPaste.entries.length === 1 ? '' : 's'} ready to add`}
+              </div>
+              <div className="modal-actions">
+                <button className="btn" onClick={() => setShowManualFilePicker(false)}>Cancel</button>
+                <button
+                  className="btn primary"
+                  onClick={manualPickerMode === 'browse' ? addManualFilesToList : addPastedFilesToList}
+                  disabled={manualPickerMode === 'browse' ? manualPickerSelectedCount === 0 : parsedManualPaste.entries.length === 0}
+                >
+                  {manualPickerMode === 'browse' ? 'Add Selected' : 'Add Parsed Files'}
+                </button>
               </div>
             </div>
           </div>

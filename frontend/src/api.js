@@ -14,6 +14,10 @@ export async function getBranches(repoPath) {
   const r = await fetch(`/api/repo/branches?repoPath=${encodeURIComponent(repoPath)}`);
   return r.json();
 }
+export async function listRepoFiles(repoPath, dirPath = '') {
+  const r = await fetch(`/api/repo/files?repoPath=${encodeURIComponent(repoPath)}&dirPath=${encodeURIComponent(dirPath)}`);
+  return r.json();
+}
 export async function browseDirectory(dirPath) {
   const r = await fetch(`/api/browse?dirPath=${encodeURIComponent(dirPath || '')}`);
   return r.json();

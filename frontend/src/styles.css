@@ -494,6 +494,16 @@ body.dark .status-badge.type_changed {
   color: #f3e8ff;
 }
 
+.status-badge.manual {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+body.dark .status-badge.manual {
+  background: #1e3a8a;
+  color: #bfdbfe;
+}
+
 .old-path {
   font-size: 10px;
   opacity: 0.7;
@@ -1342,4 +1352,103 @@ body.dark .folder-picker-item.volume-item {
 
 body.dark .folder-picker-item.volume-item:hover {
   background: linear-gradient(to right, rgba(37, 99, 235, 0.15), var(--bg));
+}
+
+.repo-picker-list {
+  max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.manual-picker-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.manual-picker-tabs .btn.active {
+  background: var(--primary);
+  color: white;
+}
+
+.manual-paste-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.manual-paste-input {
+  width: 100%;
+  min-height: 280px;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  outline: none;
+}
+
+.manual-paste-summary {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.manual-paste-hint {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.repo-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.repo-picker-item:last-child {
+  border-bottom: none;
+}
+
+.repo-picker-item.folder {
+  background: linear-gradient(to right, rgba(37, 99, 235, 0.04), transparent);
+}
+
+.repo-picker-item.file:hover,
+.repo-picker-item.folder:hover {
+  background: var(--bg);
+}
+
+.repo-picker-name-btn {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  flex: 1;
+}
+
+.repo-picker-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repo-picker-meta {
+  font-size: 12px;
+  opacity: 0.7;
+  white-space: nowrap;
 }
