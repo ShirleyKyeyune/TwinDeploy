@@ -114,6 +114,31 @@ function parsePastedFileList(input) {
   return { entries, invalidLines };
 }
 
+function normalizeDeploymentRoot(root) {
+  const normalized = String(root || '').trim().replace(/\\/g, '/');
+  if (!normalized || normalized === '/') {
+    return '/';
+  }
+  return `/${normalized.replace(/^\/+/, '').replace(/\/+$/, '')}`;
+}
+
+function buildDeploymentTargetKey(targetId, deploymentRoot) {
+  return `${targetId}::${normalizeDeploymentRoot(deploymentRoot)}`;
+}
+
+function buildQueueEntryKey(targetId, deploymentRoot, fileInfo) {
+  const path = fileInfo?.path || fileInfo || '';
+  const action = fileInfo?.action || 'upload';
+  return `${buildDeploymentTargetKey(targetId, deploymentRoot)}::${action}::${path}`;
+}
+
+function appendUnique(items, value) {
+  if (!value || items.includes(value)) {
+    return items;
+  }
+  return [...items, value];
+}
+
 export default function App() {
   const version = "1.0.0"; // TwinDeploy version
   const [repoPath, setRepoPath] = useState(() => {
@@ -144,6 +169,9 @@ export default function App() {
   const [sel, setSel] = useState({});
   const [targets, setTargets] = useState([]);
   const [targetId, setTargetId] = useState('');
+  const [deploymentTargets, setDeploymentTargets] = useState([]);
+  const [addDestinationFeedback, setAddDestinationFeedback] = useState(null);
+  const [recentlyAddedDestinationKey, setRecentlyAddedDestinationKey] = useState('');
   const [log, setLog] = useState([]);
   const [dark, setDark] = useState(false);
 
@@ -303,6 +331,64 @@ export default function App() {
     return result;
   }, [sel, availableFiles]);
 
+  const activeTarget = useMemo(
+    () => targets.find(t => t.id === targetId) || null,
+    [targets, targetId]
+  );
+
+  const activeDeploymentRoot = useMemo(() => {
+    if (!activeTarget) {
+      return '/';
+    }
+
+    if (showRemoteBrowser) {
+      return normalizeDeploymentRoot(remotePath || '/');
+    }
+
+    return normalizeDeploymentRoot(activeTarget.remoteRoot || '/');
+  }, [activeTarget, remotePath, showRemoteBrowser]);
+
+  const resolvedDeploymentTargets = useMemo(() => (
+    deploymentTargets
+      .map(entry => {
+        const target = targets.find(t => t.id === entry.targetId);
+        if (!target) return null;
+        return {
+          ...entry,
+          deploymentRoot: normalizeDeploymentRoot(entry.deploymentRoot),
+          target
+        };
+      })
+      .filter(Boolean)
+  ), [deploymentTargets, targets]);
+
+  const queuedDeploymentEntries = useMemo(() => (
+    resolvedDeploymentTargets.flatMap(destination => (
+      selectedFiles.map(fileInfo => {
+        const path = fileInfo.path || fileInfo;
+        const relativePath = destination.deploymentRoot === '/'
+          ? `/${path}`
+          : `${destination.deploymentRoot.replace(/\/+$/, '')}/${path}`;
+        const hostPrefix = destination.target?.host ? `${destination.target.host}:` : '';
+
+        return {
+          key: buildQueueEntryKey(destination.targetId, destination.deploymentRoot, fileInfo),
+          fileInfo,
+          targetId: destination.targetId,
+          deploymentRoot: destination.deploymentRoot,
+          target: destination.target,
+          fullDestPath: `${hostPrefix}${relativePath}`
+        };
+      })
+    ))
+  ), [resolvedDeploymentTargets, selectedFiles]);
+
+  const queueEntriesByKey = useMemo(() => {
+    const mapped = new Map();
+    queuedDeploymentEntries.forEach(entry => mapped.set(entry.key, entry));
+    return mapped;
+  }, [queuedDeploymentEntries]);
+
   const manualPickerSelectedCount = useMemo(
     () => Object.values(manualPickerSelection).filter(Boolean).length,
     [manualPickerSelection]
@@ -311,6 +397,23 @@ export default function App() {
     () => parsePastedFileList(manualPasteValue),
     [manualPasteValue]
   );
+
+  useEffect(() => {
+    setDeploymentTargets(prev => prev.filter(entry => targets.some(t => t.id === entry.targetId)));
+  }, [targets]);
+
+  useEffect(() => {
+    if (!addDestinationFeedback && !recentlyAddedDestinationKey) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setAddDestinationFeedback(null);
+      setRecentlyAddedDestinationKey('');
+    }, 1800);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [addDestinationFeedback, recentlyAddedDestinationKey]);
 
   function setFileSelected(path, value) {
     setSel(prev => ({ ...prev, [path]: value }));
@@ -838,66 +941,183 @@ export default function App() {
   }
   async function handleDelete(id) { if (!confirm('Delete this target?')) return; await deleteTarget(id); setTargets(ts => ts.filter(t => t.id !== id)); if (targetId === id) setTargetId(''); if (editing === id) { setEditing(null); setTForm(emptyTarget); } }
 
+  function addCurrentDeploymentTarget() {
+    if (!activeTarget) {
+      alert('Pick a target first');
+      return;
+    }
+
+    const nextEntry = {
+      targetId: activeTarget.id,
+      deploymentRoot: activeDeploymentRoot
+    };
+    const nextEntryKey = buildDeploymentTargetKey(nextEntry.targetId, nextEntry.deploymentRoot);
+
+    setDeploymentTargets(prev => {
+      const alreadyExists = prev.some(entry => (
+        entry.targetId === nextEntry.targetId &&
+        normalizeDeploymentRoot(entry.deploymentRoot) === nextEntry.deploymentRoot
+      ));
+
+      if (alreadyExists) {
+        setAddDestinationFeedback({
+          type: 'warning',
+          message: `Already added: ${activeTarget.name || activeTarget.host} → ${nextEntry.deploymentRoot}`
+        });
+        setRecentlyAddedDestinationKey('');
+        setLog(l => [...l, `Destination already added: ${activeTarget.name || activeTarget.host} → ${nextEntry.deploymentRoot}`]);
+        return prev;
+      }
+
+      setAddDestinationFeedback({
+        type: 'success',
+        message: `Added: ${activeTarget.name || activeTarget.host} → ${nextEntry.deploymentRoot}`
+      });
+      setRecentlyAddedDestinationKey(nextEntryKey);
+      setLog(l => [...l, `Added destination: ${activeTarget.name || activeTarget.host} → ${nextEntry.deploymentRoot}`]);
+      return [...prev, nextEntry];
+    });
+  }
+
+  function removeDeploymentTarget(targetIdToRemove, deploymentRootToRemove) {
+    const target = targets.find(t => t.id === targetIdToRemove);
+    const normalizedRoot = normalizeDeploymentRoot(deploymentRootToRemove);
+    setDeploymentTargets(prev => prev.filter(entry => !(
+      entry.targetId === targetIdToRemove &&
+      normalizeDeploymentRoot(entry.deploymentRoot) === normalizedRoot
+    )));
+    setLog(l => [...l, `Removed destination: ${target?.name || target?.host || 'Target'} → ${normalizedRoot}`]);
+  }
+
+  function clearDeploymentTargets() {
+    setDeploymentTargets([]);
+    setLog(l => [...l, 'Cleared deployment destinations']);
+  }
+
   async function deploy() {
     if (!repoPath) return alert('Set repoPath');
-    if (!targetId) return alert('Pick a target');
     if (selectedFiles.length === 0) return alert('Select at least one file');
-
-    // Use current remote browser path as deployment destination
-    const selectedTarget = targets.find(t => t.id === targetId);
-    let deploymentRoot = remotePath || '/';
-    if (!showRemoteBrowser && selectedTarget?.remoteRoot && selectedTarget.remoteRoot.trim()) {
-      deploymentRoot = selectedTarget.remoteRoot;
-    }
+    if (resolvedDeploymentTargets.length === 0) return alert('Add at least one destination');
 
     // Initialize deployment progress tracking
     setDeploymentActive(true);
     setDeploymentProgress({
-      total: selectedFiles.length,
+      total: queuedDeploymentEntries.length,
       completed: [],
-      current: null,
+      current: queuedDeploymentEntries[0]?.key || null,
       failed: []
     });
 
-    const res = await fetch('/api/deploy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        repoPath,
-        files: selectedFiles,
-        targetId,
-        deploymentRoot // Pass the current remote path
-      })
-    });
-    const es = new EventSourcePoly(res);
-    es.on('start', d => {
-      setLog(l => [...l, `Start: ${d.total} files → ${d.target} (${deploymentRoot})`]);
-    });
-    es.on('progress', d => {
-      setLog(l => [...l, `${d.action || 'Uploaded'} ${d.index}/${d.total}: ${d.file}`]);
-      setDeploymentProgress(prev => ({
-        ...prev,
-        completed: [...prev.completed, d.file],
-        current: d.index < d.total ? (selectedFiles[d.index]?.path || selectedFiles[d.index]) : null
-      }));
-    });
-    es.on('error', d => {
-      setLog(l => [...l, `Error: ${d.error}`]);
-      setDeploymentProgress(prev => ({
-        ...prev,
-        failed: [...prev.failed, prev.current || 'Unknown file']
-      }));
+    try {
+      for (const destination of resolvedDeploymentTargets) {
+        await new Promise((resolve) => {
+          const firstFile = selectedFiles[0];
+          const destinationQueueKeys = selectedFiles.map(fileInfo => (
+            buildQueueEntryKey(destination.targetId, destination.deploymentRoot, fileInfo)
+          ));
+          setDeploymentProgress(prev => ({
+            ...prev,
+            current: firstFile ? buildQueueEntryKey(destination.targetId, destination.deploymentRoot, firstFile) : null
+          }));
+
+          fetch('/api/deploy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              repoPath,
+              files: selectedFiles,
+              targetId: destination.targetId,
+              deploymentRoot: destination.deploymentRoot
+            })
+          })
+            .then((res) => {
+              if (!res.ok) {
+                res.json()
+                  .catch(() => ({ error: 'Deployment request failed' }))
+                  .then((payload) => {
+                    setLog(l => [...l, `Request failed for ${destination.target.name || destination.target.host}: ${payload.error || 'Deployment request failed'}`]);
+                    setDeploymentProgress(prev => ({
+                      ...prev,
+                      failed: destinationQueueKeys.reduce((acc, key) => appendUnique(acc, key), prev.failed),
+                      current: null
+                    }));
+                    resolve();
+                  });
+                return;
+              }
+
+              const es = new EventSourcePoly(res);
+
+              es.on('start', d => {
+                setLog(l => [...l, `Start: ${d.total} files → ${d.target} (${destination.deploymentRoot})`]);
+              });
+
+              es.on('progress', d => {
+                const processedFile = selectedFiles[d.index - 1];
+                const nextFile = selectedFiles[d.index];
+                const processedKey = processedFile
+                  ? buildQueueEntryKey(destination.targetId, destination.deploymentRoot, processedFile)
+                  : null;
+                const nextKey = nextFile
+                  ? buildQueueEntryKey(destination.targetId, destination.deploymentRoot, nextFile)
+                  : null;
+                const failedAction = d.action === 'delete_failed';
+
+                setLog(l => [...l, `${destination.target.name || destination.target.host}: ${d.action || 'uploaded'} ${d.index}/${d.total}: ${d.file}`]);
+                setDeploymentProgress(prev => ({
+                  ...prev,
+                  completed: failedAction ? prev.completed : appendUnique(prev.completed, processedKey),
+                  failed: failedAction ? appendUnique(prev.failed, processedKey) : prev.failed,
+                  current: nextKey
+                }));
+              });
+
+              es.on('error', d => {
+                setLog(l => [...l, `Error on ${destination.target.name || destination.target.host}: ${d.error}`]);
+                setDeploymentProgress(prev => ({
+                  ...prev,
+                  failed: appendUnique(prev.failed, prev.current),
+                  current: null
+                }));
+                es.close();
+                resolve();
+              });
+
+              es.on('done', () => {
+                setLog(l => [...l, `Done: ${destination.target.name || destination.target.host} (${destination.deploymentRoot})`]);
+                es.close();
+                setDeploymentProgress(prev => ({ ...prev, current: null }));
+                resolve();
+              });
+            })
+            .catch((error) => {
+              setLog(l => [...l, `Request failed for ${destination.target.name || destination.target.host}: ${error.message}`]);
+              setDeploymentProgress(prev => ({
+                ...prev,
+                failed: destinationQueueKeys.reduce((acc, key) => appendUnique(acc, key), prev.failed),
+                current: null
+              }));
+              resolve();
+            });
+        });
+      }
+    } finally {
       setDeploymentActive(false);
-    });
-    es.on('done', d => {
-      setLog(l => [...l, 'Done']);
-      es.close();
-      setDeploymentActive(false);
-      // Clear progress after a short delay to let user see completion
+      setDeploymentProgress(prev => ({ ...prev, current: null }));
       setTimeout(() => {
         setDeploymentProgress({ total: 0, completed: [], current: null, failed: [] });
       }, 3000);
-    });
+    }
+  }
+
+  function formatProgressEntry(entry) {
+    if (!entry) {
+      return 'Unknown deployment item';
+    }
+
+    const filePath = entry.fileInfo?.path || entry.fileInfo;
+    const action = entry.fileInfo?.action === 'delete' ? 'delete' : 'upload';
+    return `${entry.target?.name || entry.target?.host || 'Target'} (${entry.deploymentRoot}) • ${action} • ${filePath}`;
   }
 
   function renderFileDetails(fileInfo, { compactName = false } = {}) {
@@ -1045,7 +1265,11 @@ export default function App() {
           </div>
           <div className="list compact">
             {targets.map(t => (
-              <div key={t.id} className={`target-item selectable ${t.id === targetId ? 'active' : ''}`} onClick={() => { setTargetId(t.id); startEditTarget(t); }}>
+              <div
+                key={t.id}
+                className={`target-item selectable ${t.id === targetId ? 'active' : ''} ${deploymentTargets.some(entry => entry.targetId === t.id) ? 'queued' : ''}`}
+                onClick={() => { setTargetId(t.id); startEditTarget(t); }}
+              >
                 <strong>{t.name || t.host}</strong> <code>{t.protocol}</code>
                 <span className="id">#{t.id.slice(0, 8)}</span>
               </div>
@@ -1058,6 +1282,13 @@ export default function App() {
           <h3>2) Choose Remote Repository root path</h3>
           <div className="row tight">
             <button className="btn" onClick={toggleRemoteBrowser} disabled={!targetId}>{showRemoteBrowser ? 'Hide Browser' : 'Browse Remote'}</button>
+            <button
+              className={`btn ${addDestinationFeedback?.type === 'success' ? 'success' : addDestinationFeedback?.type === 'warning' ? 'warning' : ''}`}
+              onClick={addCurrentDeploymentTarget}
+              disabled={!targetId}
+            >
+              {addDestinationFeedback?.type === 'success' ? 'Added' : addDestinationFeedback?.type === 'warning' ? 'Already Added' : 'Add Destination'}
+            </button>
             {targetId && (
               <>
                 {connectionStatus === 'disconnected' && (
@@ -1076,6 +1307,14 @@ export default function App() {
                 </div>
               </>
             )}
+          </div>
+          {addDestinationFeedback && (
+            <div className={`destination-feedback ${addDestinationFeedback.type}`}>
+              {addDestinationFeedback.message}
+            </div>
+          )}
+          <div className="hint">
+            Select a target, optionally browse to a folder, then click `Add Destination`. Switch to another target and repeat to build a multi-target deployment batch.
           </div>
           {connectionError && <div className="connection-error">{connectionError}</div>}
           {showRemoteBrowser && (
@@ -1303,7 +1542,7 @@ export default function App() {
           )}
         </section>        <section className="panel wide">
           <div className="section-header-row">
-            <h3>File Queue & Deployment Progress <span className="badge">{selectedFiles.length}</span></h3>
+            <h3>File Queue & Deployment Progress <span className="badge">{queuedDeploymentEntries.length}</span></h3>
             <div className="panel-size-controls">
               <button
                 className={`btn sm ${queuePanelMode === 'collapsed' ? 'active' : ''}`}
@@ -1333,7 +1572,7 @@ export default function App() {
           {deploymentActive && (
             <div className="deployment-status">
               <div className="deployment-header">
-                <h4>Deploying {deploymentProgress.total} files...</h4>
+                <h4>Deploying {deploymentProgress.total} operations...</h4>
                 <div className="progress-summary">
                   {deploymentProgress.completed.length} completed, {deploymentProgress.failed.length} failed
                 </div>
@@ -1346,30 +1585,21 @@ export default function App() {
               {/* File Queue */}
               <div className="queue-section">
                 <h4>Queue {deploymentActive ? '(Pending)' : ''}</h4>
-                {selectedFiles.length > 0 && targetId ? (
+                {queuedDeploymentEntries.length > 0 ? (
                   <div className="file-queue">
                     <div className="queue-header">
                       <div>Source Path</div>
                       <div></div>
                       <div>Destination Path</div>
                     </div>
-                    {selectedFiles.map(fileInfo => {
-                      const path = fileInfo.path || fileInfo; // backward compatibility
-                      const selectedTarget = targets.find(t => t.id === targetId);
-                      let destinationRoot = remotePath || '/';
-                      if (!showRemoteBrowser && selectedTarget?.remoteRoot && selectedTarget.remoteRoot.trim()) {
-                        destinationRoot = selectedTarget.remoteRoot;
-                      }
-                      const relativePath = destinationRoot === '/' ?
-                        `/${path}` :
-                        `${destinationRoot.replace(/\/+$/, '')}/${path}`;
-                      const hostPrefix = selectedTarget ? `${selectedTarget.host}:` : '';
-                      const fullDestPath = `${hostPrefix}${relativePath}`;
+                    {queuedDeploymentEntries.map(entry => {
+                      const { fileInfo, target, targetId: queuedTargetId, deploymentRoot, fullDestPath, key } = entry;
+                      const path = fileInfo.path || fileInfo;
 
                       // Determine status for styling
-                      const isCompleted = deploymentProgress.completed.includes(path);
-                      const isFailed = deploymentProgress.failed.includes(path);
-                      const isCurrent = deploymentProgress.current === path;
+                      const isCompleted = deploymentProgress.completed.includes(key);
+                      const isFailed = deploymentProgress.failed.includes(key);
+                      const isCurrent = deploymentProgress.current === key;
 
                       // Show action indicator
                       const actionIcon = fileInfo.action === 'delete' ? '🗑️' : '📤';
@@ -1388,8 +1618,10 @@ export default function App() {
                         }
                       }
 
+                      const targetLabel = `${target?.name || target?.host || queuedTargetId} (${deploymentRoot})`;
+
                       return (
-                        <div key={`${path}-${fileInfo.action}`} className={`queue-item ${isCompleted ? 'completed' : ''} ${isFailed ? 'failed' : ''} ${isCurrent ? 'current' : ''}`}>
+                        <div key={key} className={`queue-item ${isCompleted ? 'completed' : ''} ${isFailed ? 'failed' : ''} ${isCurrent ? 'current' : ''}`}>
                           <div className="source-path mono" title={`${repoPath}/${path}`}>
                             {actionIcon} {displayText}
                             {isCompleted && <span className="status-icon">✅</span>}
@@ -1398,7 +1630,7 @@ export default function App() {
                           </div>
                           <div className="arrow">→</div>
                           <div className="dest-path mono" title={fullDestPath}>
-                            {destinationText}
+                            <strong>{targetLabel}</strong> {destinationText ? `• ${destinationText}` : ''}
                           </div>
                         </div>
                       );
@@ -1406,7 +1638,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="empty">
-                    {selectedFiles.length === 0 ? 'No files selected.' : 'Select a target to see destination paths.'}
+                    {selectedFiles.length === 0 ? 'No files selected.' : 'Add at least one deployment destination.'}
                   </div>
                 )}
               </div>
@@ -1423,7 +1655,7 @@ export default function App() {
                       <div className="progress-list">
                         {deploymentProgress.completed.map(file => (
                           <div key={file} className="progress-item completed">
-                            <span className="progress-file mono">{file}</span>
+                            <span className="progress-file mono">{formatProgressEntry(queueEntriesByKey.get(file))}</span>
                             <span className="progress-status">✅</span>
                           </div>
                         ))}
@@ -1436,7 +1668,7 @@ export default function App() {
                     <div className="progress-group current">
                       <h5>⏳ Transferring</h5>
                       <div className="progress-item current">
-                        <span className="progress-file mono">{deploymentProgress.current}</span>
+                        <span className="progress-file mono">{formatProgressEntry(queueEntriesByKey.get(deploymentProgress.current))}</span>
                         <span className="progress-status">⏳</span>
                       </div>
                     </div>
@@ -1449,7 +1681,7 @@ export default function App() {
                       <div className="progress-list">
                         {deploymentProgress.failed.map(file => (
                           <div key={file} className="progress-item failed">
-                            <span className="progress-file mono">{file}</span>
+                            <span className="progress-file mono">{formatProgressEntry(queueEntriesByKey.get(file))}</span>
                             <span className="progress-status">❌</span>
                           </div>
                         ))}
@@ -1465,34 +1697,46 @@ export default function App() {
           <div className="deploy-section">
             <h4>Deploy</h4>
 
-            {/* Display current deployment target */}
-            {targetId && (
-              <div className="deployment-target-info">
-                <div className="target-display">
-                  <strong>Target:</strong> {(() => {
-                    const selectedTarget = targets.find(t => t.id === targetId);
-                    if (!selectedTarget) return 'No target selected';
-
-                    let deploymentRoot = remotePath || '/';
-                    if (!showRemoteBrowser && selectedTarget?.remoteRoot && selectedTarget.remoteRoot.trim()) {
-                      deploymentRoot = selectedTarget.remoteRoot;
-                    }
-
-                    return `${selectedTarget.name || selectedTarget.host} (${selectedTarget.protocol.toUpperCase()}) → ${deploymentRoot}`;
-                  })()}
-                </div>
+            {resolvedDeploymentTargets.length > 0 ? (
+              <div className="deployment-target-list">
+                {resolvedDeploymentTargets.map(destination => (
+                  <div
+                    key={buildDeploymentTargetKey(destination.targetId, destination.deploymentRoot)}
+                    className={`deployment-target-chip ${recentlyAddedDestinationKey === buildDeploymentTargetKey(destination.targetId, destination.deploymentRoot) ? 'recently-added' : ''}`}
+                  >
+                    <span className="deployment-target-chip-label">
+                      {destination.target.name || destination.target.host} ({destination.target.protocol.toUpperCase()}) → {destination.deploymentRoot}
+                    </span>
+                    <button
+                      className="btn sm"
+                      onClick={() => removeDeploymentTarget(destination.targetId, destination.deploymentRoot)}
+                      disabled={deploymentActive}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
               </div>
+            ) : (
+              <div className="hint">No deployment destinations added yet.</div>
             )}
 
             <div className="row wrap">
               <button
+                className="btn"
+                onClick={clearDeploymentTargets}
+                disabled={resolvedDeploymentTargets.length === 0 || deploymentActive}
+              >
+                Clear Destinations
+              </button>
+              <button
                 className="btn primary"
                 onClick={deploy}
-                disabled={!targetId || selectedFiles.length === 0 || deploymentActive}
+                disabled={resolvedDeploymentTargets.length === 0 || selectedFiles.length === 0 || deploymentActive}
               >
                 {deploymentActive
                   ? `Deploying... (${deploymentProgress.completed.length}/${deploymentProgress.total})`
-                  : `Deploy ${selectedFiles.length > 0 ? `${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}` : 'selected'}`
+                  : `Deploy ${queuedDeploymentEntries.length > 0 ? `${queuedDeploymentEntries.length} operation${queuedDeploymentEntries.length === 1 ? '' : 's'}` : 'selected'}`
                 }
               </button>
             </div>
