@@ -66,6 +66,7 @@ export default function App() {
   const [committedCompareMode, setCommittedCompareMode] = useState('net'); // 'pr' | 'net'
   const [availableBranches, setAvailableBranches] = useState([]);
   const [currentBranch, setCurrentBranch] = useState('');
+  const [branchesLoading, setBranchesLoading] = useState(false);
   const [diff, setDiff] = useState([]);
   const [sel, setSel] = useState({});
   const [targets, setTargets] = useState([]);
@@ -230,24 +231,41 @@ export default function App() {
     setShowFolderPicker(false);
   }
 
-  async function loadBranches() {
+  async function loadBranches(options = {}) {
     if (!repoPath) return;
+    const { refreshCommittedDiff = false } = options;
+    setBranchesLoading(true);
     try {
       const res = await getBranches(repoPath);
       const branches = Array.from(new Set(res.baseBranches || []));
+      const nextBaseBranch = (() => {
+        if (branches.length === 0) return '';
+        if (baseBranch && branches.includes(baseBranch)) return baseBranch;
+        return pickPreferredBaseBranch(branches);
+      })();
+
       setAvailableBranches(branches);
       setCurrentBranch(res.currentBranch || '');
       rememberRepoPath(repoPath);
 
       // Keep the selected value valid so UI label and API request always match.
-      setBaseBranch(prev => {
-        if (branches.length === 0) return '';
-        if (prev && branches.includes(prev)) return prev;
-        return pickPreferredBaseBranch(branches);
-      });
+      setBaseBranch(nextBaseBranch);
+
+      if (refreshCommittedDiff && mode === 'committed') {
+        setDiff([]);
+        setSel({});
+        const committed = await getCommitted(repoPath, nextBaseBranch, committedCompareMode);
+        setDiff(committed.items || []);
+      }
     } catch (e) {
       console.error('Failed to load branches:', e);
+    } finally {
+      setBranchesLoading(false);
     }
+  }
+
+  async function reloadCurrentBranch() {
+    await loadBranches({ refreshCommittedDiff: diff.length > 0 });
   }
 
   async function scan() {
@@ -956,11 +974,14 @@ export default function App() {
               <option value="pr">PR diff</option>
               <option value="net">Net diff</option>
             </select>
+            <button className="btn" onClick={reloadCurrentBranch} disabled={!repoPath || branchesLoading} title="Refresh the checked-out branch and branch list without reloading the page">
+              {branchesLoading ? 'Reloading...' : 'Reload Branch'}
+            </button>
             <button className="btn primary" onClick={scan}>Scan</button>
           </div>
           <div className="hint">
             {mode === 'committed' && currentBranch ?
-              `On branch: ${currentBranch}. Comparing against ${baseBranch} using ${committedCompareMode === 'pr' ? 'PR diff (merge-base)' : 'Net diff (tip-to-tip)'}.` :
+              `On branch: ${currentBranch}. Comparing against ${baseBranch} using ${committedCompareMode === 'pr' ? 'PR diff (merge-base)' : 'Net diff (tip-to-tip)'}. Use Reload Branch after checking out a different branch outside the app.` :
               mode === 'staged' ?
                 'Staged files ready for commit.' :
                 'Changed files since the specified reference.'
