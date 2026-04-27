@@ -896,7 +896,7 @@ body.dark .destination-feedback.warning {
 
 .queue-header {
   display: grid;
-  grid-template-columns: 1fr 30px 1fr;
+  grid-template-columns: 1fr 30px 1fr auto;
   background: rgba(0, 0, 0, 0.05);
   padding: 8px 12px;
   font-weight: 500;
@@ -905,7 +905,8 @@ body.dark .destination-feedback.warning {
 
 .queue-item {
   display: grid;
-  grid-template-columns: 1fr 30px 1fr;
+  grid-template-columns: 1fr 30px 1fr auto;
+  align-items: center;
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
 }
@@ -1488,6 +1489,22 @@ body.dark .folder-picker-item.volume-item:hover {
   border-radius: 6px;
   padding: 12px;
   outline: none;
+}
+
+.ignore-rules-input {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  outline: none;
+  margin-bottom: 10px;
 }
 
 .manual-paste-summary {

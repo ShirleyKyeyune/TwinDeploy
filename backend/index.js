@@ -301,6 +301,35 @@ app.get('/api/browse', async (req, res) => {
   }
 });
 
+const activeDeployments = new Map();
+
+function buildDeploymentFileKey(fileInfo) {
+  const rel = typeof fileInfo === 'string' ? fileInfo : fileInfo.path;
+  const action = typeof fileInfo === 'string' ? 'upload' : fileInfo.action || 'upload';
+  return `${action}::${rel}`;
+}
+
+function createDeploymentControl(id) {
+  return {
+    id,
+    paused: false,
+    skippedKeys: new Set(),
+    waiters: []
+  };
+}
+
+async function waitIfDeploymentPaused(control) {
+  while (control.paused) {
+    await new Promise(resolve => control.waiters.push(resolve));
+  }
+}
+
+function resumeDeployment(control) {
+  control.paused = false;
+  const waiters = control.waiters.splice(0);
+  waiters.forEach(resolve => resolve());
+}
+
 // Deploy (creates manifest + streams progress via SSE)
 app.post('/api/deploy', async (req, res) => {
   const { repoPath, files, targetId, note, deploymentRoot } = req.body;
@@ -313,6 +342,8 @@ app.post('/api/deploy', async (req, res) => {
 
   const root = await getRepoRoot(repoPath);
   const id = uuid();
+  const deploymentControl = createDeploymentControl(id);
+  activeDeployments.set(id, deploymentControl);
   const manifest = { id, createdAt: new Date().toISOString(), repoRoot: root, files, targetId, note, deploymentRoot: effectiveRemoteRoot };
   await addManifest(manifest);
 
@@ -322,15 +353,19 @@ app.post('/api/deploy', async (req, res) => {
   write('start', { id, total: files.length, target: target.name || target.host });
 
   const onProgress = (p) => write('progress', p);
+  const controls = {
+    waitIfPaused: () => waitIfDeploymentPaused(deploymentControl),
+    shouldSkip: fileInfo => deploymentControl.skippedKeys.has(buildDeploymentFileKey(fileInfo))
+  };
 
   try {
     // Create a modified target with the effective remote root
     const targetWithEffectiveRoot = { ...target, remoteRoot: effectiveRemoteRoot };
 
     if (target.protocol === 'sftp') {
-      await uploadWithSFTP(targetWithEffectiveRoot, root, files, onProgress);
+      await uploadWithSFTP(targetWithEffectiveRoot, root, files, onProgress, controls);
     } else if (target.protocol === 'ftps') {
-      await uploadWithFTPS(targetWithEffectiveRoot, root, files, onProgress);
+      await uploadWithFTPS(targetWithEffectiveRoot, root, files, onProgress, controls);
     } else {
       throw new Error('Unsupported protocol: ' + target.protocol);
     }
@@ -338,8 +373,34 @@ app.post('/api/deploy', async (req, res) => {
   } catch (err) {
     write('error', { error: err.message });
   } finally {
+    activeDeployments.delete(id);
     res.end();
   }
+});
+
+app.post('/api/deployments/:id/pause', (req, res) => {
+  const deployment = activeDeployments.get(req.params.id);
+  if (!deployment) return res.status(404).json({ error: 'Deployment not active' });
+  deployment.paused = true;
+  res.json({ ok: true, paused: true });
+});
+
+app.post('/api/deployments/:id/resume', (req, res) => {
+  const deployment = activeDeployments.get(req.params.id);
+  if (!deployment) return res.status(404).json({ error: 'Deployment not active' });
+  resumeDeployment(deployment);
+  res.json({ ok: true, paused: false });
+});
+
+app.post('/api/deployments/:id/skip', (req, res) => {
+  const deployment = activeDeployments.get(req.params.id);
+  if (!deployment) return res.status(404).json({ error: 'Deployment not active' });
+
+  const { path: filePath, action = 'upload' } = req.body || {};
+  if (!filePath) return res.status(400).json({ error: 'path required' });
+
+  deployment.skippedKeys.add(`${action}::${filePath}`);
+  res.json({ ok: true });
 });
 
 // Replay previous manifest to a different target

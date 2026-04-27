@@ -49,6 +49,9 @@ export async function disconnectTarget(targetId) { const r = await fetch(`/api/t
 export async function getConnectionStatus(targetId) { const r = await fetch(`/api/targets/${targetId}/status`); return r.json(); }
 export async function downloadFile(targetId, filePath) { const r = await fetch(`/api/targets/${targetId}/download?path=${encodeURIComponent(filePath)}`); return r; }
 export async function uploadFile(targetId, filePath, fileContent) { const r = await fetch(`/api/targets/${targetId}/upload`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: filePath, content: fileContent }) }); return r.json(); }
+export async function pauseDeployment(deploymentId) { const r = await fetch(`/api/deployments/${deploymentId}/pause`, { method: 'POST' }); return r.json(); }
+export async function resumeDeployment(deploymentId) { const r = await fetch(`/api/deployments/${deploymentId}/resume`, { method: 'POST' }); return r.json(); }
+export async function skipDeploymentFile(deploymentId, fileInfo) { const r = await fetch(`/api/deployments/${deploymentId}/skip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: fileInfo.path || fileInfo, action: fileInfo.action || 'upload' }) }); return r.json(); }
 
 // Helper to read SSE from a fetch Response (Safari-friendly)
 class EventSourcePoly {

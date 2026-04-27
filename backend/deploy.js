@@ -4,14 +4,38 @@ import fs from 'fs/promises';
 import path from 'path';
 import mime from 'mime';
 
-export async function uploadWithSFTP(target, root, files, onProgress) {
+function getFileRel(fileInfo) {
+  return typeof fileInfo === 'string' ? fileInfo : fileInfo.path;
+}
+
+function getFileAction(fileInfo) {
+  return typeof fileInfo === 'string' ? 'upload' : fileInfo.action;
+}
+
+async function prepareNextFile(fileInfo, index, total, controls, onProgress) {
+  const rel = getFileRel(fileInfo);
+  const action = getFileAction(fileInfo);
+
+  await controls?.waitIfPaused?.({ fileInfo, index, total, rel, action });
+
+  if (controls?.shouldSkip?.(fileInfo)) {
+    onProgress?.({ index: index + 1, total, file: rel, action: 'skipped' });
+    return null;
+  }
+
+  return { rel, action };
+}
+
+export async function uploadWithSFTP(target, root, files, onProgress, controls = {}) {
   const sftp = new SftpClient();
   await sftp.connect({ host: target.host, username: target.user, privateKeyPath: target.key, password: target.password, port: target.port || 22 });
+  const ensuredDirs = new Set();
   try {
     for (let i = 0; i < files.length; i++) {
       const fileInfo = files[i];
-      const rel = typeof fileInfo === 'string' ? fileInfo : fileInfo.path;
-      const action = typeof fileInfo === 'string' ? 'upload' : fileInfo.action;
+      const nextFile = await prepareNextFile(fileInfo, i, files.length, controls, onProgress);
+      if (!nextFile) continue;
+      const { rel, action } = nextFile;
 
       if (action === 'delete') {
         // Delete file from remote
@@ -38,7 +62,10 @@ export async function uploadWithSFTP(target, root, files, onProgress) {
         // Upload new file
         const src = path.join(root, rel);
         const dir = path.posix.dirname(newPath);
-        await sftp.mkdir(dir, true);
+        if (!ensuredDirs.has(dir)) {
+          await sftp.mkdir(dir, true);
+          ensuredDirs.add(dir);
+        }
         await sftp.fastPut(src, newPath);
         onProgress?.({ index: i + 1, total: files.length, file: `${fileInfo.oldPath} → ${rel}`, action: 'renamed' });
       } else {
@@ -46,7 +73,10 @@ export async function uploadWithSFTP(target, root, files, onProgress) {
         const src = path.join(root, rel);
         const dst = path.posix.join(target.remoteRoot.replaceAll('\\','/'), rel.split(path.sep).join('/'));
         const dir = path.posix.dirname(dst);
-        await sftp.mkdir(dir, true);
+        if (!ensuredDirs.has(dir)) {
+          await sftp.mkdir(dir, true);
+          ensuredDirs.add(dir);
+        }
         await sftp.fastPut(src, dst);
         onProgress?.({ index: i + 1, total: files.length, file: rel, action: action || 'uploaded' });
       }
@@ -56,9 +86,10 @@ export async function uploadWithSFTP(target, root, files, onProgress) {
   }
 }
 
-export async function uploadWithFTPS(target, root, files, onProgress) {
+export async function uploadWithFTPS(target, root, files, onProgress, controls = {}) {
   const client = new ftp.Client(0);
   client.ftp.verbose = false;
+  const ensuredDirs = new Set();
 
   try {
     const accessOptions = {
@@ -79,11 +110,13 @@ export async function uploadWithFTPS(target, root, files, onProgress) {
 
     await client.access(accessOptions);
     await client.ensureDir(target.remoteRoot);
+    ensuredDirs.add(target.remoteRoot);
 
     for (let i = 0; i < files.length; i++) {
       const fileInfo = files[i];
-      const rel = typeof fileInfo === 'string' ? fileInfo : fileInfo.path;
-      const action = typeof fileInfo === 'string' ? 'upload' : fileInfo.action;
+      const nextFile = await prepareNextFile(fileInfo, i, files.length, controls, onProgress);
+      if (!nextFile) continue;
+      const { rel, action } = nextFile;
 
       if (action === 'delete') {
         // Delete file from remote
@@ -110,7 +143,10 @@ export async function uploadWithFTPS(target, root, files, onProgress) {
         // Upload new file
         const src = path.join(root, rel);
         const dir = path.posix.dirname(newPath);
-        await client.ensureDir(dir);
+        if (!ensuredDirs.has(dir)) {
+          await client.ensureDir(dir);
+          ensuredDirs.add(dir);
+        }
         await client.uploadFrom(src, newPath);
         onProgress?.({ index: i + 1, total: files.length, file: `${fileInfo.oldPath} → ${rel}`, action: 'renamed' });
       } else {
@@ -118,7 +154,10 @@ export async function uploadWithFTPS(target, root, files, onProgress) {
         const src = path.join(root, rel);
         const remotePath = path.posix.join(target.remoteRoot.replaceAll('\\','/'), rel.split(path.sep).join('/'));
         const dir = path.posix.dirname(remotePath);
-        await client.ensureDir(dir);
+        if (!ensuredDirs.has(dir)) {
+          await client.ensureDir(dir);
+          ensuredDirs.add(dir);
+        }
         await client.uploadFrom(src, remotePath);
         onProgress?.({ index: i + 1, total: files.length, file: rel, action: action || 'uploaded' });
       }

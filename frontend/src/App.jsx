@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile, browseDirectory, listRepoFiles } from './api';
+import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile, browseDirectory, listRepoFiles, pauseDeployment, resumeDeployment, skipDeploymentFile } from './api';
 
 const LAST_REPO_STORAGE_KEY = 'twindeploy.lastRepoPath';
 const RECENT_REPOS_STORAGE_KEY = 'twindeploy.recentRepoPaths';
+const IGNORE_RULES_STORAGE_KEY = 'twindeploy.ignoreRules';
 const MAX_RECENT_REPOS = 10;
+const DEFAULT_IGNORE_RULES = ['.DS_Store'];
 
 // Helper to read SSE from a fetch Response (Safari-friendly)
 class EventSourcePoly {
@@ -122,6 +124,46 @@ function normalizeDeploymentRoot(root) {
   return `/${normalized.replace(/^\/+/, '').replace(/\/+$/, '')}`;
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function globToRegExp(pattern) {
+  const source = String(pattern)
+    .split('*').map(part => part.split('?').map(escapeRegExp).join('[^/]')).join('.*');
+  return new RegExp(`^${source}$`);
+}
+
+function parseIgnoreRules(value) {
+  return String(value || '')
+    .split('\n')
+    .map(rule => rule.trim().replace(/\\/g, '/'))
+    .filter(rule => rule && !rule.startsWith('#'));
+}
+
+function isPathIgnored(path, rules) {
+  const normalizedPath = String(path || '').replace(/\\/g, '/').replace(/^\.\/+/, '');
+  const basename = normalizedPath.split('/').pop();
+
+  return rules.some(rule => {
+    if (rule.endsWith('/')) {
+      const dirRule = rule.replace(/\/+$/, '');
+      return normalizedPath === dirRule ||
+        normalizedPath.startsWith(`${dirRule}/`) ||
+        normalizedPath.includes(`/${dirRule}/`);
+    }
+
+    const hasPathSeparator = rule.includes('/');
+    const target = hasPathSeparator ? normalizedPath : basename;
+
+    if (rule.includes('*') || rule.includes('?')) {
+      return globToRegExp(rule).test(target);
+    }
+
+    return target === rule;
+  });
+}
+
 function buildDeploymentTargetKey(targetId, deploymentRoot) {
   return `${targetId}::${normalizeDeploymentRoot(deploymentRoot)}`;
 }
@@ -173,7 +215,15 @@ export default function App() {
   const [addDestinationFeedback, setAddDestinationFeedback] = useState(null);
   const [recentlyAddedDestinationKey, setRecentlyAddedDestinationKey] = useState('');
   const [log, setLog] = useState([]);
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = useState(true);
+  const [showIgnoreDialog, setShowIgnoreDialog] = useState(false);
+  const [ignoreRulesText, setIgnoreRulesText] = useState(() => {
+    try {
+      return localStorage.getItem(IGNORE_RULES_STORAGE_KEY) || DEFAULT_IGNORE_RULES.join('\n');
+    } catch {
+      return DEFAULT_IGNORE_RULES.join('\n');
+    }
+  });
 
   // File view state
   const [fileViewMode, setFileViewMode] = useState('list'); // 'list' | 'tree'
@@ -196,11 +246,17 @@ export default function App() {
 
   // Deployment progress state
   const [deploymentActive, setDeploymentActive] = useState(false);
+  const [deploymentPaused, setDeploymentPaused] = useState(false);
+  const [activeDeploymentId, setActiveDeploymentId] = useState('');
+  const activeDeploymentDestination = useRef(null);
+  const removedQueueKeysRef = useRef(new Set());
+  const [removedQueueKeys, setRemovedQueueKeys] = useState([]);
   const [deploymentProgress, setDeploymentProgress] = useState({
     total: 0,
     completed: [],
     current: null,
-    failed: []
+    failed: [],
+    skipped: []
   });
 
   // Folder picker state
@@ -267,6 +323,13 @@ export default function App() {
   }
 
   useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(IGNORE_RULES_STORAGE_KEY, ignoreRulesText);
+    } catch {
+      // Ignore storage errors silently.
+    }
+  }, [ignoreRulesText]);
   useEffect(() => { listTargets().then(setTargets); }, []);
   useEffect(() => {
     if (!repoPath && recentRepos.length > 0) {
@@ -287,7 +350,12 @@ export default function App() {
     setShowManualFilePicker(false);
   }, [repoPath]);
 
-  const availableFiles = useMemo(() => {
+  const ignoreRules = useMemo(() => parseIgnoreRules(ignoreRulesText), [ignoreRulesText]);
+  const isIgnoredFilePath = useMemo(
+    () => path => isPathIgnored(path, ignoreRules),
+    [ignoreRules]
+  );
+  const allCandidateFiles = useMemo(() => {
     const byPath = new Map();
     diff.forEach(fileInfo => {
       byPath.set(fileInfo.path, fileInfo);
@@ -299,12 +367,36 @@ export default function App() {
     });
     return Array.from(byPath.values());
   }, [diff, manualFiles]);
+  const availableFiles = useMemo(
+    () => allCandidateFiles.filter(fileInfo => !isIgnoredFilePath(fileInfo.path || fileInfo)),
+    [allCandidateFiles, isIgnoredFilePath]
+  );
+  const ignoredFileCount = allCandidateFiles.length - availableFiles.length;
+  const ignoreRuleCount = ignoreRules.length;
+
+  useEffect(() => {
+    setSel(prev => {
+      let changed = false;
+      const next = { ...prev };
+      Object.keys(next).forEach(path => {
+        if (isIgnoredFilePath(path)) {
+          delete next[path];
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [isIgnoredFilePath]);
 
   const selectedFiles = useMemo(() => {
     const selectedPaths = Object.keys(sel).filter(k => sel[k]);
     const result = [];
 
     selectedPaths.forEach(path => {
+      if (isIgnoredFilePath(path)) {
+        return;
+      }
+
       const fileInfo = availableFiles.find(f => f.path === path);
       if (!fileInfo) {
         // Fallback for backward compatibility
@@ -334,7 +426,7 @@ export default function App() {
     });
 
     return result;
-  }, [sel, availableFiles]);
+  }, [sel, availableFiles, isIgnoredFilePath]);
 
   const activeTarget = useMemo(
     () => targets.find(t => t.id === targetId) || null,
@@ -388,6 +480,11 @@ export default function App() {
     ))
   ), [resolvedDeploymentTargets, selectedFiles]);
 
+  const visibleQueuedDeploymentEntries = useMemo(
+    () => queuedDeploymentEntries.filter(entry => !removedQueueKeys.includes(entry.key)),
+    [queuedDeploymentEntries, removedQueueKeys]
+  );
+
   const queueEntriesByKey = useMemo(() => {
     const mapped = new Map();
     queuedDeploymentEntries.forEach(entry => mapped.set(entry.key, entry));
@@ -422,6 +519,15 @@ export default function App() {
 
   function setFileSelected(path, value) {
     setSel(prev => ({ ...prev, [path]: value }));
+    if (deploymentActive && !value) {
+      visibleQueuedDeploymentEntries
+        .filter(entry => (entry.fileInfo.path || entry.fileInfo) === path)
+        .forEach(entry => {
+          if (isQueueEntryPending(entry)) {
+            removePendingQueueEntry(entry);
+          }
+        });
+    }
   }
 
   async function openFolderPicker() {
@@ -689,12 +795,14 @@ export default function App() {
   // Select/deselect all files in a folder recursively
   function toggleFolderSelection(folder, value) {
     const newSel = { ...sel };
+    const affectedPaths = [];
 
     function processFolder(f) {
       // Select all files in this folder
       f.files.forEach(fileInfo => {
         const path = fileInfo.path || fileInfo;
         newSel[path] = value;
+        affectedPaths.push(path);
       });
 
       // Recursively process subfolders
@@ -703,6 +811,17 @@ export default function App() {
 
     processFolder(folder);
     setSel(newSel);
+
+    if (deploymentActive && !value) {
+      const affectedPathSet = new Set(affectedPaths);
+      visibleQueuedDeploymentEntries
+        .filter(entry => affectedPathSet.has(entry.fileInfo.path || entry.fileInfo))
+        .forEach(entry => {
+          if (isQueueEntryPending(entry)) {
+            removePendingQueueEntry(entry);
+          }
+        });
+    }
   }
 
   // Check if all files in a folder are selected
@@ -1102,27 +1221,98 @@ export default function App() {
     setLog(l => [...l, 'Cleared deployment destinations']);
   }
 
+  async function toggleDeploymentPause() {
+    if (!activeDeploymentId) return;
+    try {
+      if (deploymentPaused) {
+        await resumeDeployment(activeDeploymentId);
+        setDeploymentPaused(false);
+        setLog(l => [...l, 'Deployment resumed']);
+      } else {
+        await pauseDeployment(activeDeploymentId);
+        setDeploymentPaused(true);
+        setLog(l => [...l, 'Deployment paused after the current operation finishes']);
+      }
+    } catch (error) {
+      setLog(l => [...l, `Deployment pause/resume error: ${error.message || 'Unknown error'}`]);
+    }
+  }
+
+  function isQueueEntryPending(entry) {
+    return deploymentActive &&
+      !deploymentProgress.completed.includes(entry.key) &&
+      !deploymentProgress.failed.includes(entry.key) &&
+      !deploymentProgress.skipped.includes(entry.key) &&
+      deploymentProgress.current !== entry.key;
+  }
+
+  async function removePendingQueueEntry(entry) {
+    if (!isQueueEntryPending(entry)) return;
+
+    removedQueueKeysRef.current.add(entry.key);
+    setRemovedQueueKeys(prev => appendUnique(prev, entry.key));
+    setDeploymentProgress(prev => ({
+      ...prev,
+      total: Math.max(0, prev.total - 1),
+      skipped: appendUnique(prev.skipped, entry.key)
+    }));
+
+    const activeDestination = activeDeploymentDestination.current;
+    const isActiveDestination = activeDeploymentId &&
+      activeDestination?.targetId === entry.targetId &&
+      normalizeDeploymentRoot(activeDestination.deploymentRoot) === normalizeDeploymentRoot(entry.deploymentRoot);
+
+    if (isActiveDestination) {
+      try {
+        await skipDeploymentFile(activeDeploymentId, entry.fileInfo);
+      } catch (error) {
+        setLog(l => [...l, `Could not remove pending operation on server: ${error.message || 'Unknown error'}`]);
+      }
+    }
+
+    setLog(l => [...l, `Removed pending operation: ${entry.fileInfo.path || entry.fileInfo}`]);
+  }
+
   async function deploy() {
     if (!repoPath) return alert('Set repoPath');
     if (selectedFiles.length === 0) return alert('Select at least one file');
     if (resolvedDeploymentTargets.length === 0) return alert('Add at least one destination');
 
     // Initialize deployment progress tracking
+    removedQueueKeysRef.current = new Set();
+    setRemovedQueueKeys([]);
     setDeploymentActive(true);
+    setDeploymentPaused(false);
+    setActiveDeploymentId('');
     setDeploymentProgress({
-      total: queuedDeploymentEntries.length,
+      total: visibleQueuedDeploymentEntries.length,
       completed: [],
-      current: queuedDeploymentEntries[0]?.key || null,
-      failed: []
+      current: visibleQueuedDeploymentEntries[0]?.key || null,
+      failed: [],
+      skipped: []
     });
 
     try {
       for (const destination of resolvedDeploymentTargets) {
         await new Promise((resolve) => {
-          const firstFile = selectedFiles[0];
-          const destinationQueueKeys = selectedFiles.map(fileInfo => (
+          const filesForDestination = selectedFiles.filter(fileInfo => {
+            const queueKey = buildQueueEntryKey(destination.targetId, destination.deploymentRoot, fileInfo);
+            return !removedQueueKeysRef.current.has(queueKey);
+          });
+
+          if (filesForDestination.length === 0) {
+            resolve();
+            return;
+          }
+
+          const firstFile = filesForDestination[0];
+          const destinationQueueKeys = filesForDestination.map(fileInfo => (
             buildQueueEntryKey(destination.targetId, destination.deploymentRoot, fileInfo)
           ));
+          activeDeploymentDestination.current = {
+            targetId: destination.targetId,
+            deploymentRoot: destination.deploymentRoot
+          };
           setDeploymentProgress(prev => ({
             ...prev,
             current: firstFile ? buildQueueEntryKey(destination.targetId, destination.deploymentRoot, firstFile) : null
@@ -1133,7 +1323,7 @@ export default function App() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               repoPath,
-              files: selectedFiles,
+              files: filesForDestination,
               targetId: destination.targetId,
               deploymentRoot: destination.deploymentRoot
             })
@@ -1157,12 +1347,17 @@ export default function App() {
               const es = new EventSourcePoly(res);
 
               es.on('start', d => {
+                setActiveDeploymentId(d.id);
+                setDeploymentPaused(false);
                 setLog(l => [...l, `Start: ${d.total} files → ${d.target} (${destination.deploymentRoot})`]);
               });
 
               es.on('progress', d => {
-                const processedFile = selectedFiles[d.index - 1];
-                const nextFile = selectedFiles[d.index];
+                const processedFile = filesForDestination[d.index - 1];
+                const nextFile = filesForDestination.find((fileInfo, index) => (
+                  index > d.index - 1 &&
+                  !removedQueueKeysRef.current.has(buildQueueEntryKey(destination.targetId, destination.deploymentRoot, fileInfo))
+                ));
                 const processedKey = processedFile
                   ? buildQueueEntryKey(destination.targetId, destination.deploymentRoot, processedFile)
                   : null;
@@ -1170,12 +1365,14 @@ export default function App() {
                   ? buildQueueEntryKey(destination.targetId, destination.deploymentRoot, nextFile)
                   : null;
                 const failedAction = d.action === 'delete_failed';
+                const skippedAction = d.action === 'skipped';
 
                 setLog(l => [...l, `${destination.target.name || destination.target.host}: ${d.action || 'uploaded'} ${d.index}/${d.total}: ${d.file}`]);
                 setDeploymentProgress(prev => ({
                   ...prev,
-                  completed: failedAction ? prev.completed : appendUnique(prev.completed, processedKey),
+                  completed: failedAction || skippedAction ? prev.completed : appendUnique(prev.completed, processedKey),
                   failed: failedAction ? appendUnique(prev.failed, processedKey) : prev.failed,
+                  skipped: skippedAction ? appendUnique(prev.skipped, processedKey) : prev.skipped,
                   current: nextKey
                 }));
               });
@@ -1194,6 +1391,8 @@ export default function App() {
               es.on('done', () => {
                 setLog(l => [...l, `Done: ${destination.target.name || destination.target.host} (${destination.deploymentRoot})`]);
                 es.close();
+                setActiveDeploymentId('');
+                setDeploymentPaused(false);
                 setDeploymentProgress(prev => ({ ...prev, current: null }));
                 resolve();
               });
@@ -1211,9 +1410,12 @@ export default function App() {
       }
     } finally {
       setDeploymentActive(false);
+      setDeploymentPaused(false);
+      setActiveDeploymentId('');
+      activeDeploymentDestination.current = null;
       setDeploymentProgress(prev => ({ ...prev, current: null }));
       setTimeout(() => {
-        setDeploymentProgress({ total: 0, completed: [], current: null, failed: [] });
+        setDeploymentProgress({ total: 0, completed: [], current: null, failed: [], skipped: [] });
       }, 3000);
     }
   }
@@ -1583,6 +1785,9 @@ export default function App() {
               </button>
             </div>
             <div className="selection-actions">
+              <button className="btn sm" onClick={() => setShowIgnoreDialog(true)}>
+                Ignore Rules ({ignoreRuleCount})
+              </button>
               <button className="btn sm" onClick={openManualFilePicker} disabled={!repoPath}>Add Files</button>
               {manualFiles.length > 0 && (
                 <button className="btn sm" onClick={clearManualFiles}>
@@ -1653,7 +1858,7 @@ export default function App() {
           )}
         </section>        <section className="panel wide">
           <div className="section-header-row">
-            <h3>File Queue & Deployment Progress <span className="badge">{queuedDeploymentEntries.length}</span></h3>
+            <h3>File Queue & Deployment Progress <span className="badge">{visibleQueuedDeploymentEntries.length}</span></h3>
             <div className="panel-size-controls">
               <button
                 className={`btn sm ${queuePanelMode === 'collapsed' ? 'active' : ''}`}
@@ -1683,9 +1888,9 @@ export default function App() {
           {deploymentActive && (
             <div className="deployment-status">
               <div className="deployment-header">
-                <h4>Deploying {deploymentProgress.total} operations...</h4>
+                <h4>{deploymentPaused ? 'Deployment paused' : `Deploying ${deploymentProgress.total} operations...`}</h4>
                 <div className="progress-summary">
-                  {deploymentProgress.completed.length} completed, {deploymentProgress.failed.length} failed
+                  {deploymentProgress.completed.length} completed, {deploymentProgress.failed.length} failed, {deploymentProgress.skipped.length} removed
                 </div>
               </div>
             </div>
@@ -1696,14 +1901,15 @@ export default function App() {
               {/* File Queue */}
               <div className="queue-section">
                 <h4>Queue {deploymentActive ? '(Pending)' : ''}</h4>
-                {queuedDeploymentEntries.length > 0 ? (
+                {visibleQueuedDeploymentEntries.length > 0 ? (
                   <div className="file-queue">
                     <div className="queue-header">
                       <div>Source Path</div>
                       <div></div>
                       <div>Destination Path</div>
+                      <div></div>
                     </div>
-                    {queuedDeploymentEntries.map(entry => {
+                    {visibleQueuedDeploymentEntries.map(entry => {
                       const { fileInfo, target, targetId: queuedTargetId, deploymentRoot, fullDestPath, key } = entry;
                       const path = fileInfo.path || fileInfo;
 
@@ -1711,6 +1917,7 @@ export default function App() {
                       const isCompleted = deploymentProgress.completed.includes(key);
                       const isFailed = deploymentProgress.failed.includes(key);
                       const isCurrent = deploymentProgress.current === key;
+                      const canRemovePending = isQueueEntryPending(entry);
 
                       // Show action indicator
                       const actionIcon = fileInfo.action === 'delete' ? '🗑️' : '📤';
@@ -1743,6 +1950,16 @@ export default function App() {
                           <div className="dest-path mono" title={fullDestPath}>
                             <strong>{targetLabel}</strong> {destinationText ? `• ${destinationText}` : ''}
                           </div>
+                          {deploymentActive && (
+                            <button
+                              className="btn sm"
+                              onClick={() => removePendingQueueEntry(entry)}
+                              disabled={!canRemovePending}
+                              title={canRemovePending ? 'Remove this pending operation from the active deployment' : 'Only pending operations can be removed'}
+                            >
+                              Remove
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -1847,9 +2064,18 @@ export default function App() {
               >
                 {deploymentActive
                   ? `Deploying... (${deploymentProgress.completed.length}/${deploymentProgress.total})`
-                  : `Deploy ${queuedDeploymentEntries.length > 0 ? `${queuedDeploymentEntries.length} operation${queuedDeploymentEntries.length === 1 ? '' : 's'}` : 'selected'}`
+                  : `Deploy ${visibleQueuedDeploymentEntries.length > 0 ? `${visibleQueuedDeploymentEntries.length} operation${visibleQueuedDeploymentEntries.length === 1 ? '' : 's'}` : 'selected'}`
                 }
               </button>
+              {deploymentActive && (
+                <button
+                  className="btn"
+                  onClick={toggleDeploymentPause}
+                  disabled={!activeDeploymentId}
+                >
+                  {deploymentPaused ? 'Resume Deployment' : 'Pause Deployment'}
+                </button>
+              )}
             </div>
           </div>
         </section>
@@ -1923,6 +2149,46 @@ export default function App() {
                   disabled={editingFile.content === editingFile.originalContent}
                 >
                   Save {editingFile.content !== editingFile.originalContent ? '*' : ''}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ignore Rules Modal */}
+      {showIgnoreDialog && (
+        <div className="modal-overlay" onClick={() => setShowIgnoreDialog(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 640 }}>
+            <div className="modal-header">
+              <h3>Ignore Files</h3>
+              <button className="btn sm" onClick={() => setShowIgnoreDialog(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <textarea
+                className="ignore-rules-input"
+                value={ignoreRulesText}
+                onChange={e => setIgnoreRulesText(e.target.value)}
+                spellCheck={false}
+                placeholder={`.DS_Store\n*.log\nnode_modules/`}
+              />
+              <div className="hint">
+                One rule per line. Supports filenames, folder prefixes ending in `/`, and `*` or `?` globs.
+              </div>
+            </div>
+            <div className="modal-footer">
+              <div className="hint">
+                {ignoreRuleCount} rule{ignoreRuleCount === 1 ? '' : 's'} active, {ignoredFileCount} file{ignoredFileCount === 1 ? '' : 's'} ignored
+              </div>
+              <div className="modal-actions">
+                <button
+                  className="btn"
+                  onClick={() => setIgnoreRulesText(DEFAULT_IGNORE_RULES.join('\n'))}
+                >
+                  Reset Defaults
+                </button>
+                <button className="btn primary" onClick={() => setShowIgnoreDialog(false)}>
+                  Done
                 </button>
               </div>
             </div>
