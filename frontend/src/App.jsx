@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile, browseDirectory, listRepoFiles } from './api';
 
 const LAST_REPO_STORAGE_KEY = 'twindeploy.lastRepoPath';
@@ -186,6 +186,9 @@ export default function App() {
   const [remoteBusy, setRemoteBusy] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState('disconnected'); // 'connected', 'disconnected', 'connecting', 'disconnecting'
   const [connectionError, setConnectionError] = useState('');
+  const connectAbortController = useRef(null);
+  const connectionAttemptId = useRef(0);
+  const connectionLogTimer = useRef(null);
 
   // File editor state
   const [editingFile, setEditingFile] = useState(null); // { path, content, originalContent }
@@ -210,6 +213,8 @@ export default function App() {
   const [manualFilePickerPath, setManualFilePickerPath] = useState('');
   const [manualFilePickerData, setManualFilePickerData] = useState(null);
   const [manualFilePickerLoading, setManualFilePickerLoading] = useState(false);
+  const [manualFolderPickerLoading, setManualFolderPickerLoading] = useState({});
+  const [manualFolderPickerSelection, setManualFolderPickerSelection] = useState({});
   const [manualPickerSelection, setManualPickerSelection] = useState({});
   const [manualPasteValue, setManualPasteValue] = useState('');
   const [queuePanelMode, setQueuePanelMode] = useState('default'); // 'collapsed' | 'default' | 'expanded'
@@ -460,6 +465,7 @@ export default function App() {
     setShowManualFilePicker(true);
     setManualPickerMode('browse');
     setManualPickerSelection({});
+    setManualFolderPickerSelection({});
     setManualPasteValue('');
     await loadManualFilePicker('');
   }
@@ -483,6 +489,42 @@ export default function App() {
 
   function toggleManualPickerFile(path, value) {
     setManualPickerSelection(prev => ({ ...prev, [path]: value }));
+  }
+
+  async function toggleManualPickerFolder(path, value) {
+    if (!repoPath || manualFolderPickerLoading[path]) return;
+
+    setManualFolderPickerLoading(prev => ({ ...prev, [path]: true }));
+    try {
+      const data = await listRepoFiles(repoPath, path, { recursive: true });
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      setManualPickerSelection(prev => {
+        const next = { ...prev };
+        (data.files || []).forEach(file => {
+          next[file.path] = value;
+        });
+        return next;
+      });
+      setManualFolderPickerSelection(prev => {
+        const next = { ...prev, [path]: value };
+        (data.directories || []).forEach(dir => {
+          next[dir.path] = value;
+        });
+        return next;
+      });
+    } catch (e) {
+      setManualFolderPickerSelection(prev => ({ ...prev, [path]: !value }));
+      alert('Failed to select folder files: ' + e.message);
+    } finally {
+      setManualFolderPickerLoading(prev => {
+        const next = { ...prev };
+        delete next[path];
+        return next;
+      });
+    }
   }
 
   function addManualEntriesToList(entries) {
@@ -519,6 +561,7 @@ export default function App() {
 
     addManualEntriesToList(selectedEntries);
     setManualPickerSelection({});
+    setManualFolderPickerSelection({});
     setShowManualFilePicker(false);
   }
 
@@ -742,15 +785,44 @@ export default function App() {
   }
 
   // Connection management
+  function stopConnectionProgressLog() {
+    if (connectionLogTimer.current) {
+      window.clearInterval(connectionLogTimer.current);
+      connectionLogTimer.current = null;
+    }
+  }
+
   async function handleConnect() {
     if (!targetId) return;
+    const target = targets.find(t => t.id === targetId);
+    const targetLabel = target?.name || target?.host || 'server';
+    const protocolLabel = String(target?.protocol || 'remote').toUpperCase();
+    const portLabel = target?.port || (target?.protocol === 'sftp' ? 22 : 21);
+    const activeAttemptId = connectionAttemptId.current + 1;
+    connectionAttemptId.current = activeAttemptId;
+    connectAbortController.current?.abort();
+    stopConnectionProgressLog();
+    connectAbortController.current = new AbortController();
     setConnectionStatus('connecting');
     setConnectionError('');
+    setLog(l => [
+      ...l,
+      `Connecting to ${targetLabel} (${protocolLabel} ${target?.host || ''}:${portLabel})...`,
+      'Opening remote connection. This can take a while if the server is slow or unreachable.'
+    ]);
+    const startedAt = Date.now();
+    connectionLogTimer.current = window.setInterval(() => {
+      if (activeAttemptId !== connectionAttemptId.current) return;
+      const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+      setLog(l => [...l, `Still connecting to ${targetLabel} after ${elapsedSeconds}s...`]);
+    }, 10000);
     try {
-      const result = await connectTarget(targetId);
+      const result = await connectTarget(targetId, { signal: connectAbortController.current.signal });
+      if (activeAttemptId !== connectionAttemptId.current) return;
+      stopConnectionProgressLog();
       if (result.ok) {
         setConnectionStatus('connected');
-        setLog(l => [...l, `Connected to ${targets.find(t => t.id === targetId)?.host || 'server'}`]);
+        setLog(l => [...l, `Connected to ${targetLabel}`]);
         // After connecting, automatically show remote browser and browse root directory
         setShowRemoteBrowser(true);
         // Force browse even if connectionStatus hasn't updated yet
@@ -761,14 +833,50 @@ export default function App() {
         setLog(l => [...l, `Connection error: ${result.error || 'Unknown error'}`]);
       }
     } catch (error) {
+      if (error.name === 'AbortError') {
+        return;
+      }
+      if (activeAttemptId !== connectionAttemptId.current) return;
+      stopConnectionProgressLog();
       setConnectionStatus('disconnected');
       setConnectionError(error.message || 'Connection failed');
       setLog(l => [...l, `Connection error: ${error.message || 'Unknown error'}`]);
+    } finally {
+      if (activeAttemptId === connectionAttemptId.current) {
+        stopConnectionProgressLog();
+        connectAbortController.current = null;
+      }
+    }
+  }
+
+  async function handleCancelConnect() {
+    if (!targetId) return;
+    const target = targets.find(t => t.id === targetId);
+    const targetLabel = target?.name || target?.host || 'server';
+    connectionAttemptId.current += 1;
+    connectAbortController.current?.abort();
+    connectAbortController.current = null;
+    stopConnectionProgressLog();
+    setConnectionStatus('disconnecting');
+    setLog(l => [...l, `Cancelling connection to ${targetLabel}...`]);
+    try {
+      await disconnectTarget(targetId);
+      setLog(l => [...l, `Cancelled connection to ${targetLabel}`]);
+    } catch (error) {
+      setLog(l => [...l, `Cancel connection error: ${error.message || 'Unknown error'}`]);
+    } finally {
+      setConnectionStatus('disconnected');
+      setRemoteItems([]);
+      setShowRemoteBrowser(false);
     }
   }
 
   async function handleDisconnect() {
     if (!targetId) return;
+    connectionAttemptId.current += 1;
+    connectAbortController.current?.abort();
+    connectAbortController.current = null;
+    stopConnectionProgressLog();
     setConnectionStatus('disconnecting');
     try {
       await disconnectTarget(targetId);
@@ -1297,8 +1405,11 @@ export default function App() {
                 {connectionStatus === 'connected' && (
                   <button className="btn danger" onClick={handleDisconnect}>Disconnect</button>
                 )}
-                {['connecting', 'disconnecting'].includes(connectionStatus) && (
-                  <button className="btn" disabled>{connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnecting...'}</button>
+                {connectionStatus === 'connecting' && (
+                  <button className="btn danger" onClick={handleCancelConnect}>Cancel Connect</button>
+                )}
+                {connectionStatus === 'disconnecting' && (
+                  <button className="btn" disabled>Disconnecting...</button>
                 )}
                 <div className={`connection-status ${connectionStatus}`}>
                   {connectionStatus === 'connected' ? 'Connected' :
@@ -1973,6 +2084,17 @@ export default function App() {
                     <div className="repo-picker-list">
                       {manualFilePickerData.directories.map(dir => (
                         <div key={dir.path} className="repo-picker-item folder">
+                          <input
+                            type="checkbox"
+                            checked={!!manualFolderPickerSelection[dir.path]}
+                            disabled={!!manualFolderPickerLoading[dir.path]}
+                            onChange={e => {
+                              const checked = e.target.checked;
+                              setManualFolderPickerSelection(prev => ({ ...prev, [dir.path]: checked }));
+                              toggleManualPickerFolder(dir.path, checked);
+                            }}
+                            title="Select all files in this folder and its subfolders"
+                          />
                           <button
                             className="btn sm"
                             onClick={() => loadManualFilePicker(dir.path)}
@@ -1987,7 +2109,9 @@ export default function App() {
                           >
                             {dir.name}
                           </button>
-                          <span className="repo-picker-meta">Folder</span>
+                          <span className="repo-picker-meta">
+                            {manualFolderPickerLoading[dir.path] ? 'Selecting...' : 'Folder'}
+                          </span>
                         </div>
                       ))}
 

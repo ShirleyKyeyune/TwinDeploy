@@ -14,8 +14,15 @@ export async function getBranches(repoPath) {
   const r = await fetch(`/api/repo/branches?repoPath=${encodeURIComponent(repoPath)}`);
   return r.json();
 }
-export async function listRepoFiles(repoPath, dirPath = '') {
-  const r = await fetch(`/api/repo/files?repoPath=${encodeURIComponent(repoPath)}&dirPath=${encodeURIComponent(dirPath)}`);
+export async function listRepoFiles(repoPath, dirPath = '', options = {}) {
+  const params = new URLSearchParams({
+    repoPath,
+    dirPath
+  });
+  if (options.recursive) {
+    params.set('recursive', 'true');
+  }
+  const r = await fetch(`/api/repo/files?${params.toString()}`);
   return r.json();
 }
 export async function browseDirectory(dirPath) {
@@ -37,7 +44,7 @@ export async function startReplay(payload) {
 export async function listManifests() { const r = await fetch('/api/manifests'); return r.json(); }
 export async function testTarget(t) { const r = await fetch('/api/targets/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(t) }); return r.json(); }
 export async function listRemoteDir(targetId, path) { const r = await fetch(`/api/targets/${targetId}/browse?path=${encodeURIComponent(path || '/')}`); return r.json(); }
-export async function connectTarget(targetId) { const r = await fetch(`/api/targets/${targetId}/connect`, { method: 'POST' }); return r.json(); }
+export async function connectTarget(targetId, options = {}) { const r = await fetch(`/api/targets/${targetId}/connect`, { method: 'POST', signal: options.signal }); return r.json(); }
 export async function disconnectTarget(targetId) { const r = await fetch(`/api/targets/${targetId}/disconnect`, { method: 'POST' }); return r.json(); }
 export async function getConnectionStatus(targetId) { const r = await fetch(`/api/targets/${targetId}/status`); return r.json(); }
 export async function downloadFile(targetId, filePath) { const r = await fetch(`/api/targets/${targetId}/download?path=${encodeURIComponent(filePath)}`); return r; }

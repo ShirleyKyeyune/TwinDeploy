@@ -63,7 +63,7 @@ app.get('/api/repo/branches', async (req, res) => {
 });
 app.get('/api/repo/files', async (req, res) => {
   try {
-    const { repoPath, dirPath = '' } = req.query;
+    const { repoPath, dirPath = '', recursive = 'false' } = req.query;
     if (!repoPath) {
       return res.status(400).json({ error: 'repoPath required' });
     }
@@ -74,6 +74,62 @@ app.get('/api/repo/files', async (req, res) => {
 
     if (currentDir !== repoRoot && !currentDir.startsWith(`${repoRoot}${path.sep}`)) {
       return res.status(400).json({ error: 'Invalid directory path' });
+    }
+
+    async function listFilesRecursively(startDir) {
+      const files = [];
+      const directories = [];
+      const pending = [startDir];
+
+      while (pending.length > 0) {
+        const dir = pending.pop();
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+
+        for (const entry of entries) {
+          if (entry.name === '.git') continue;
+
+          const absolutePath = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            directories.push({
+              name: entry.name,
+              path: path.relative(repoRoot, absolutePath).split(path.sep).join('/')
+            });
+            pending.push(absolutePath);
+            continue;
+          }
+
+          if (!entry.isFile()) continue;
+
+          let size = 0;
+          try {
+            const stat = await fs.stat(absolutePath);
+            size = stat.size;
+          } catch {
+            // Ignore stat failures and keep size at 0.
+          }
+
+          files.push({
+            name: entry.name,
+            path: path.relative(repoRoot, absolutePath).split(path.sep).join('/'),
+            size
+          });
+        }
+      }
+
+      return {
+        directories: directories.sort((a, b) => a.path.localeCompare(b.path)),
+        files: files.sort((a, b) => a.path.localeCompare(b.path))
+      };
+    }
+
+    if (recursive === 'true') {
+      const recursiveEntries = await listFilesRecursively(currentDir);
+      return res.json({
+        root: repoRoot,
+        currentPath: path.relative(repoRoot, currentDir).split(path.sep).join('/'),
+        directories: recursiveEntries.directories,
+        files: recursiveEntries.files
+      });
     }
 
     const entries = await fs.readdir(currentDir, { withFileTypes: true });
@@ -368,6 +424,16 @@ app.post('/api/targets/test', async (req, res) => {
 
 // Connection management
 const activeConnections = new Map(); // targetId -> { client, protocol }
+const pendingConnections = new Map(); // targetId -> { client, protocol, cancelled }
+
+function closeConnection(connection) {
+  if (!connection?.client) return;
+  if (connection.protocol === 'sftp') {
+    Promise.resolve(connection.client.end()).catch(() => {});
+  } else if (connection.protocol === 'ftps') {
+    connection.client.close();
+  }
+}
 
 // Connect to target
 app.post('/api/targets/:id/connect', async (req, res) => {
@@ -377,15 +443,46 @@ app.post('/api/targets/:id/connect', async (req, res) => {
   if (activeConnections.has(id)) {
     return res.json({ ok: true, connected: true, message: 'Already connected' });
   }
+  if (pendingConnections.has(id)) {
+    return res.status(409).json({ error: 'Connection already in progress' });
+  }
+
+  let pendingConnection = null;
+  let requestCancelled = false;
+  let connectCompleted = false;
+  req.on('close', () => {
+    if (connectCompleted) return;
+    requestCancelled = true;
+    if (pendingConnection) {
+      pendingConnection.cancelled = true;
+      closeConnection(pendingConnection);
+      pendingConnections.delete(id);
+    }
+  });
+
+  function sendConnectResponse(status, payload) {
+    connectCompleted = true;
+    if (res.writableEnded || res.destroyed) {
+      return undefined;
+    }
+    return res.status(status).json(payload);
+  }
 
   try {
     const targets = await getTargets();
     const target = targets.find(t => t.id === id);
-    if (!target) return res.status(404).json({ error: 'Target not found' });
+    if (!target) return sendConnectResponse(404, { error: 'Target not found' });
 
     if (target.protocol === 'sftp') {
       const SftpClient = (await import('ssh2-sftp-client')).default;
       const client = new SftpClient();
+      pendingConnection = { client, protocol: 'sftp', cancelled: requestCancelled };
+      pendingConnections.set(id, pendingConnection);
+      if (pendingConnection.cancelled) {
+        pendingConnections.delete(id);
+        closeConnection(pendingConnection);
+        return;
+      }
       await client.connect({
         host: target.host,
         port: target.port || 22,
@@ -394,13 +491,25 @@ app.post('/api/targets/:id/connect', async (req, res) => {
         privateKeyPath: target.key
       });
 
+      pendingConnections.delete(id);
+      if (pendingConnection.cancelled) {
+        closeConnection(pendingConnection);
+        return sendConnectResponse(200, { ok: false, connected: false, cancelled: true, error: 'Connection cancelled' });
+      }
       activeConnections.set(id, { client, protocol: 'sftp' });
-      res.json({ ok: true, connected: true });
+      sendConnectResponse(200, { ok: true, connected: true });
 
     } else if (target.protocol === 'ftps') {
       const ftp = (await import('basic-ftp')).default;
       const client = new ftp.Client(0);
       client.ftp.verbose = false;
+      pendingConnection = { client, protocol: 'ftps', cancelled: requestCancelled };
+      pendingConnections.set(id, pendingConnection);
+      if (pendingConnection.cancelled) {
+        pendingConnections.delete(id);
+        closeConnection(pendingConnection);
+        return;
+      }
 
       const accessOptions = {
         host: target.host,
@@ -420,20 +529,40 @@ app.post('/api/targets/:id/connect', async (req, res) => {
 
       await client.access(accessOptions);
 
+      pendingConnections.delete(id);
+      if (pendingConnection.cancelled) {
+        closeConnection(pendingConnection);
+        return sendConnectResponse(200, { ok: false, connected: false, cancelled: true, error: 'Connection cancelled' });
+      }
       activeConnections.set(id, { client, protocol: 'ftps' });
-      res.json({ ok: true, connected: true });
+      sendConnectResponse(200, { ok: true, connected: true });
 
     } else {
-      res.status(400).json({ error: 'Unsupported protocol' });
+      sendConnectResponse(400, { error: 'Unsupported protocol' });
     }
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (pendingConnection) {
+      pendingConnections.delete(id);
+      closeConnection(pendingConnection);
+      if (pendingConnection.cancelled) {
+        return sendConnectResponse(200, { ok: false, connected: false, cancelled: true, error: 'Connection cancelled' });
+      }
+    }
+    sendConnectResponse(500, { error: error.message });
   }
 });
 
 // Disconnect from target
 app.post('/api/targets/:id/disconnect', async (req, res) => {
   const { id } = req.params;
+
+  if (pendingConnections.has(id)) {
+    const pendingConnection = pendingConnections.get(id);
+    pendingConnection.cancelled = true;
+    closeConnection(pendingConnection);
+    pendingConnections.delete(id);
+    return res.json({ ok: true, cancelled: true });
+  }
 
   if (!activeConnections.has(id)) {
     return res.json({ ok: true, message: 'Already disconnected' });
