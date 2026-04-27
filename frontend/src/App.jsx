@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { getChanged, getStaged, getCommitted, getBranches, listTargets, addTarget, updateTarget, deleteTarget, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile, browseDirectory, listRepoFiles, pauseDeployment, resumeDeployment, skipDeploymentFile } from './api';
+import { getChanged, getStaged, getCommitted, getBranches, getCommits, listTargets, addTarget, updateTarget, deleteTarget, listRemoteDir, testTarget, connectTarget, disconnectTarget, getConnectionStatus, downloadFile, uploadFile, browseDirectory, listRepoFiles, pauseDeployment, resumeDeployment, skipDeploymentFile } from './api';
 
 const LAST_REPO_STORAGE_KEY = 'twindeploy.lastRepoPath';
 const RECENT_REPOS_STORAGE_KEY = 'twindeploy.recentRepoPaths';
@@ -202,9 +202,15 @@ export default function App() {
   const [mode, setMode] = useState('staged'); // 'changed' | 'staged' | 'committed'
   const [baseRef, setBaseRef] = useState('HEAD~1');
   const [baseBranch, setBaseBranch] = useState(''); // For committed changes mode
-  const [committedCompareMode, setCommittedCompareMode] = useState('net'); // 'pr' | 'net'
+  const [committedCompareMode, setCommittedCompareMode] = useState('net'); // 'pr' | 'net' | 'range'
   const [availableBranches, setAvailableBranches] = useState([]);
+  const [allBranches, setAllBranches] = useState([]);
   const [currentBranch, setCurrentBranch] = useState('');
+  const [commitBranch, setCommitBranch] = useState('');
+  const [availableCommits, setAvailableCommits] = useState([]);
+  const [fromCommit, setFromCommit] = useState('');
+  const [toCommit, setToCommit] = useState('');
+  const [commitsLoading, setCommitsLoading] = useState(false);
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [diff, setDiff] = useState([]);
   const [manualFiles, setManualFiles] = useState([]);
@@ -297,6 +303,13 @@ export default function App() {
     return branches[0];
   }
 
+  function formatCommitOption(commit) {
+    if (!commit) return '';
+    const date = commit.date ? new Date(commit.date).toLocaleDateString() : '';
+    const subject = commit.subject || '(no subject)';
+    return `${commit.shortHash || commit.hash.slice(0, 7)} ${date ? `• ${date} • ` : '• '}${subject}`;
+  }
+
   function rememberRepoPath(path) {
     const trimmed = (path || '').trim();
     if (!trimmed) return;
@@ -338,6 +351,11 @@ export default function App() {
   }, [repoPath, recentRepos]);
   useEffect(() => { loadBranches(); }, [repoPath]);
   useEffect(() => {
+    if (repoPath && committedCompareMode === 'range') {
+      loadCommits(commitBranch || currentBranch || 'HEAD');
+    }
+  }, [repoPath, commitBranch, committedCompareMode]);
+  useEffect(() => {
     setDiff([]);
     setSel({});
     setExpandedFolders({});
@@ -348,6 +366,9 @@ export default function App() {
     setManualFilePickerPath('');
     setManualPasteValue('');
     setShowManualFilePicker(false);
+    setAvailableCommits([]);
+    setFromCommit('');
+    setToCommit('');
   }, [repoPath]);
 
   const ignoreRules = useMemo(() => parseIgnoreRules(ignoreRulesText), [ignoreRulesText]);
@@ -703,14 +724,23 @@ export default function App() {
     try {
       const res = await getBranches(repoPath);
       const branches = Array.from(new Set(res.baseBranches || []));
+      const branchList = Array.from(new Set(res.branches || branches));
+      const nextCurrentBranch = res.currentBranch || '';
       const nextBaseBranch = (() => {
         if (branches.length === 0) return '';
         if (baseBranch && branches.includes(baseBranch)) return baseBranch;
         return pickPreferredBaseBranch(branches);
       })();
+      const nextCommitBranch = (() => {
+        if (commitBranch && branchList.includes(commitBranch)) return commitBranch;
+        if (nextCurrentBranch && branchList.includes(nextCurrentBranch)) return nextCurrentBranch;
+        return branchList[0] || nextCurrentBranch || 'HEAD';
+      })();
 
       setAvailableBranches(branches);
-      setCurrentBranch(res.currentBranch || '');
+      setAllBranches(branchList);
+      setCurrentBranch(nextCurrentBranch);
+      setCommitBranch(nextCommitBranch);
       rememberRepoPath(repoPath);
 
       // Keep the selected value valid so UI label and API request always match.
@@ -718,13 +748,37 @@ export default function App() {
 
       if (refreshCommittedDiff && mode === 'committed') {
         setDiff([]);
-        const committed = await getCommitted(repoPath, nextBaseBranch, committedCompareMode);
+        const committed = committedCompareMode === 'range'
+          ? await getCommitted(repoPath, nextBaseBranch, 'range', { fromRef: fromCommit, toRef: toCommit })
+          : await getCommitted(repoPath, nextBaseBranch, committedCompareMode);
         setDiff(committed.items || []);
       }
     } catch (e) {
       console.error('Failed to load branches:', e);
     } finally {
       setBranchesLoading(false);
+    }
+  }
+
+  async function loadCommits(branchRef = commitBranch || currentBranch || 'HEAD') {
+    if (!repoPath) return;
+    setCommitsLoading(true);
+    try {
+      const res = await getCommits(repoPath, branchRef, 100);
+      const commits = res.commits || [];
+      setAvailableCommits(commits);
+      setToCommit(prev => (prev && commits.some(commit => commit.hash === prev)) ? prev : (commits[0]?.hash || ''));
+      setFromCommit(prev => {
+        if (prev && commits.some(commit => commit.hash === prev)) return prev;
+        return commits[1]?.hash || commits[0]?.hash || '';
+      });
+    } catch (e) {
+      console.error('Failed to load commits:', e);
+      setAvailableCommits([]);
+      setFromCommit('');
+      setToCommit('');
+    } finally {
+      setCommitsLoading(false);
     }
   }
 
@@ -738,9 +792,25 @@ export default function App() {
     if (mode === 'changed') {
       res = await getChanged(repoPath, baseRef);
     } else if (mode === 'committed') {
-      res = await getCommitted(repoPath, baseBranch, committedCompareMode);
+      if (committedCompareMode === 'range') {
+        if (!fromCommit || !toCommit) {
+          alert('Select both commits before scanning a commit range.');
+          return;
+        }
+        if (fromCommit === toCommit) {
+          alert('Choose two different commits for the range.');
+          return;
+        }
+        res = await getCommitted(repoPath, baseBranch, 'range', { fromRef: fromCommit, toRef: toCommit });
+      } else {
+        res = await getCommitted(repoPath, baseBranch, committedCompareMode);
+      }
     } else {
       res = await getStaged(repoPath);
+    }
+    if (res.error) {
+      alert('Scan failed: ' + res.error);
+      return;
     }
     const items = res.items || []; setDiff(items);
     rememberRepoPath(repoPath);
@@ -1742,7 +1812,7 @@ export default function App() {
             <input value={baseRef} onChange={e => setBaseRef(e.target.value)} style={{ width: 140 }} disabled={mode !== 'changed'} />
             <label className="radio"><input type="radio" checked={mode === 'staged'} onChange={() => setMode('staged')} /> Staged</label>
             <label className="radio"><input type="radio" checked={mode === 'committed'} onChange={() => setMode('committed')} /> Committed vs</label>
-            <select value={baseBranch} onChange={e => setBaseBranch(e.target.value)} style={{ width: 140 }} disabled={mode !== 'committed'}>
+            <select value={baseBranch} onChange={e => setBaseBranch(e.target.value)} style={{ width: 140 }} disabled={mode !== 'committed' || committedCompareMode === 'range'}>
               {availableBranches.map(branch => (
                 <option key={branch} value={branch}>{branch}</option>
               ))}
@@ -1751,15 +1821,46 @@ export default function App() {
             <select value={committedCompareMode} onChange={e => setCommittedCompareMode(e.target.value)} style={{ width: 110 }} disabled={mode !== 'committed'} title="Comparison type: PR diff uses merge-base, Net diff compares branch tips">
               <option value="pr">PR diff</option>
               <option value="net">Net diff</option>
+              <option value="range">Commit range</option>
             </select>
             <button className="btn" onClick={reloadCurrentBranch} disabled={!repoPath || branchesLoading} title="Refresh the checked-out branch and branch list without reloading the page">
               {branchesLoading ? 'Reloading...' : 'Reload Branch'}
             </button>
             <button className="btn primary" onClick={scan}>Scan</button>
           </div>
+          {mode === 'committed' && committedCompareMode === 'range' && (
+            <div className="row tight commit-range-row">
+              <label className="radio">Branch</label>
+              <select value={commitBranch} onChange={e => setCommitBranch(e.target.value)} style={{ width: 160 }} disabled={commitsLoading}>
+                {allBranches.map(branch => (
+                  <option key={branch} value={branch}>{branch}</option>
+                ))}
+                {allBranches.length === 0 && <option value={currentBranch || 'HEAD'}>{currentBranch || 'HEAD'}</option>}
+              </select>
+              <label className="radio">Base</label>
+              <select value={fromCommit} onChange={e => setFromCommit(e.target.value)} className="commit-select" disabled={commitsLoading || availableCommits.length === 0}>
+                {availableCommits.map(commit => (
+                  <option key={commit.hash} value={commit.hash}>{formatCommitOption(commit)}</option>
+                ))}
+                {availableCommits.length === 0 && <option value="">no commits</option>}
+              </select>
+              <label className="radio">Tip</label>
+              <select value={toCommit} onChange={e => setToCommit(e.target.value)} className="commit-select" disabled={commitsLoading || availableCommits.length === 0}>
+                {availableCommits.map(commit => (
+                  <option key={commit.hash} value={commit.hash}>{formatCommitOption(commit)}</option>
+                ))}
+                {availableCommits.length === 0 && <option value="">no commits</option>}
+              </select>
+              <button className="btn sm" onClick={() => loadCommits(commitBranch || currentBranch || 'HEAD')} disabled={commitsLoading}>
+                {commitsLoading ? 'Loading...' : 'Reload Commits'}
+              </button>
+            </div>
+          )}
           <div className="hint">
             {mode === 'committed' && currentBranch ?
-              `On branch: ${currentBranch}. Comparing against ${baseBranch} using ${committedCompareMode === 'pr' ? 'PR diff (merge-base)' : 'Net diff (tip-to-tip)'}. Use Reload Branch after checking out a different branch outside the app.` :
+              committedCompareMode === 'range'
+                ? `On branch: ${currentBranch}. Comparing selected commits on ${commitBranch || currentBranch || 'HEAD'} using base..tip range. Use Reload Branch after checking out a different branch outside the app.`
+                : `On branch: ${currentBranch}. Comparing against ${baseBranch} using ${committedCompareMode === 'pr' ? 'PR diff (merge-base)' : 'Net diff (tip-to-tip)'}. Use Reload Branch after checking out a different branch outside the app.` :
               mode === 'staged' ?
                 'Staged files ready for commit.' :
                 'Changed files since the specified reference.'

@@ -6,12 +6,32 @@ export async function getStaged(repoPath) {
   const r = await fetch(`/api/repo/staged?repoPath=${encodeURIComponent(repoPath)}`);
   return r.json();
 }
-export async function getCommitted(repoPath, baseBranch, compareMode = 'net') {
-  const r = await fetch(`/api/repo/committed?repoPath=${encodeURIComponent(repoPath)}&baseBranch=${encodeURIComponent(baseBranch || '')}&compareMode=${encodeURIComponent(compareMode)}`);
+export async function getCommitted(repoPath, baseBranch, compareMode = 'net', options = {}) {
+  const params = new URLSearchParams({
+    repoPath,
+    baseBranch: baseBranch || '',
+    compareMode
+  });
+  if (options.fromRef) {
+    params.set('fromRef', options.fromRef);
+  }
+  if (options.toRef) {
+    params.set('toRef', options.toRef);
+  }
+  const r = await fetch(`/api/repo/committed?${params.toString()}`);
   return r.json();
 }
 export async function getBranches(repoPath) {
   const r = await fetch(`/api/repo/branches?repoPath=${encodeURIComponent(repoPath)}`);
+  return r.json();
+}
+export async function getCommits(repoPath, branch, limit = 50) {
+  const params = new URLSearchParams({
+    repoPath,
+    branch: branch || 'HEAD',
+    limit: String(limit)
+  });
+  const r = await fetch(`/api/repo/commits?${params.toString()}`);
   return r.json();
 }
 export async function listRepoFiles(repoPath, dirPath = '', options = {}) {

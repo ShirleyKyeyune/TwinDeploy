@@ -62,6 +62,47 @@ export async function getBaseBranches(repoPath) {
   return [...new Set(baseBranches)]; // Remove duplicates
 }
 
+export async function getBranches(repoPath) {
+  const git = simpleGit(repoPath);
+  const branches = await git.branch(['-a']);
+  return [...new Set(
+    branches.all
+      .map(b => b.trim())
+      .map(b => b.replace(/^\*\s*/, ''))
+      .map(b => b.split(' -> ')[0])
+      .map(b => b.replace(/^remotes\//, ''))
+      .filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b));
+}
+
+export async function getBranchCommits(repoPath, branchRef = 'HEAD', limit = 50) {
+  const git = simpleGit(repoPath);
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const ref = branchRef || 'HEAD';
+  const output = await git.raw([
+    'log',
+    ref,
+    `--max-count=${safeLimit}`,
+    '--date=iso-strict',
+    '--format=%H%x1f%h%x1f%ct%x1f%an%x1f%s%x1e'
+  ]);
+
+  return output
+    .split('\x1e')
+    .map(record => record.trim())
+    .filter(Boolean)
+    .map(record => {
+      const [hash, shortHash, unixTimestamp, author, subject] = record.split('\x1f');
+      return {
+        hash,
+        shortHash,
+        author,
+        subject,
+        date: new Date(Number(unixTimestamp) * 1000).toISOString()
+      };
+    });
+}
+
 export async function listChanged(repoPath, baseRef = 'HEAD~1') {
   const git = simpleGit(repoPath);
   const root = await getRepoRoot(repoPath);
@@ -115,6 +156,18 @@ export async function listCommittedChanges(repoPath, baseBranch = 'main', compar
       return parseDiffOutput(diffOutput);
     }
   }
+}
+
+export async function listCommitRangeChanges(repoPath, fromRef, toRef = 'HEAD') {
+  const git = simpleGit(repoPath);
+  await getRepoRoot(repoPath);
+
+  if (!fromRef || !toRef) {
+    throw new Error('Both fromRef and toRef are required');
+  }
+
+  const diffOutput = await git.diff([`${fromRef}..${toRef}`, '--name-status', '--diff-filter=ACMRTD']);
+  return parseDiffOutput(diffOutput);
 }
 
 export async function listStaged(repoPath) {

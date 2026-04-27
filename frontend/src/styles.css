@@ -793,6 +793,15 @@ body.dark .destination-feedback.warning {
   font-size: 13px;
 }
 
+.commit-range-row {
+  align-items: center;
+}
+
+.commit-select {
+  width: min(100%, 320px);
+  min-width: 220px;
+}
+
 .checkbox {
   display: flex;
   align-items: center;

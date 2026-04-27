@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { v4 as uuid } from 'uuid';
-import { listChanged, listStaged, getRepoRoot, listCommittedChanges, getBaseBranches, getCurrentBranch } from './git.js';
+import { listChanged, listStaged, getRepoRoot, listCommittedChanges, listCommitRangeChanges, getBaseBranches, getBranches, getBranchCommits, getCurrentBranch } from './git.js';
 import { getTargets, saveTargets, addManifest, getManifests } from './store.js';
 import { uploadWithSFTP, uploadWithFTPS } from './deploy.js';
 import fs from 'fs/promises';
@@ -48,8 +48,10 @@ app.get('/api/repo/staged', async (req, res) => {
 });
 app.get('/api/repo/committed', async (req, res) => {
   try {
-    const { repoPath, baseBranch = 'main', compareMode = 'net' } = req.query;
-    const items = await listCommittedChanges(repoPath, baseBranch, compareMode);
+    const { repoPath, baseBranch = 'main', compareMode = 'net', fromRef = '', toRef = '' } = req.query;
+    const items = compareMode === 'range'
+      ? await listCommitRangeChanges(repoPath, fromRef, toRef)
+      : await listCommittedChanges(repoPath, baseBranch, compareMode);
     res.json({ items });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
@@ -57,8 +59,16 @@ app.get('/api/repo/branches', async (req, res) => {
   try {
     const { repoPath } = req.query;
     const baseBranches = await getBaseBranches(repoPath);
+    const branches = await getBranches(repoPath);
     const currentBranch = await getCurrentBranch(repoPath);
-    res.json({ baseBranches, currentBranch });
+    res.json({ baseBranches, branches, currentBranch });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.get('/api/repo/commits', async (req, res) => {
+  try {
+    const { repoPath, branch = 'HEAD', limit = 50 } = req.query;
+    const commits = await getBranchCommits(repoPath, branch, limit);
+    res.json({ commits });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.get('/api/repo/files', async (req, res) => {
