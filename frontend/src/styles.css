@@ -746,6 +746,11 @@ body.dark .tree-toggle:hover {
   opacity: .7;
 }
 
+.inline-feedback {
+  font-size: 12px;
+  opacity: .75;
+}
+
 .destination-feedback {
   margin-top: 8px;
   padding: 8px 10px;
@@ -1342,9 +1347,8 @@ body.dark .destination-feedback.warning {
 
 /* Footer styles */
 .App-footer {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
+  grid-column: 1 / -1;
+  justify-self: end;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1352,7 +1356,6 @@ body.dark .destination-feedback.warning {
   font-size: 12px;
   color: var(--text);
   opacity: 0.8;
-  z-index: 100;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
   transition: opacity 0.2s;
 }

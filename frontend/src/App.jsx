@@ -221,6 +221,7 @@ export default function App() {
   const [addDestinationFeedback, setAddDestinationFeedback] = useState(null);
   const [recentlyAddedDestinationKey, setRecentlyAddedDestinationKey] = useState('');
   const [log, setLog] = useState([]);
+  const [logCopyFeedback, setLogCopyFeedback] = useState('');
   const [dark, setDark] = useState(true);
   const [showIgnoreDialog, setShowIgnoreDialog] = useState(false);
   const [ignoreRulesText, setIgnoreRulesText] = useState(() => {
@@ -537,6 +538,42 @@ export default function App() {
 
     return () => window.clearTimeout(timeoutId);
   }, [addDestinationFeedback, recentlyAddedDestinationKey]);
+
+  useEffect(() => {
+    if (!logCopyFeedback) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => setLogCopyFeedback(''), 1600);
+    return () => window.clearTimeout(timeoutId);
+  }, [logCopyFeedback]);
+
+  async function copyLogsToClipboard() {
+    const text = log.join('\n');
+    if (!text) {
+      setLogCopyFeedback('No logs to copy');
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setLogCopyFeedback('Copied');
+    } catch (e) {
+      setLogCopyFeedback('Copy failed');
+    }
+  }
 
   function setFileSelected(path, value) {
     setSel(prev => ({ ...prev, [path]: value }));
@@ -2214,9 +2251,18 @@ export default function App() {
             </div>
           </div>
           <div className="row tight">
+            <button className="btn sm" onClick={copyLogsToClipboard} disabled={log.length === 0} title="Copy all logs">
+              📋 Copy
+            </button>
             <button className="btn sm" onClick={() => setLog([])}>Clear</button>
+            {logCopyFeedback && <span className="inline-feedback">{logCopyFeedback}</span>}
           </div>
         </section>
+
+        <footer className="App-footer">
+          <p>Version: {version}</p>
+          <p>Developed by Shirley Godfrey Kyeyune</p>
+        </footer>
       </div>
 
       {/* File Editor Modal */}
@@ -2550,10 +2596,6 @@ export default function App() {
         </div>
       )}
 
-      <footer className="App-footer">
-        <p>Version: {version}</p>
-        <p>Developed by Shirley Godfrey Kyeyune</p>
-      </footer>
     </div>
   );
 }
