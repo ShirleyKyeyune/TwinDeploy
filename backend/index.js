@@ -500,7 +500,7 @@ const pendingConnections = new Map(); // targetId -> { client, protocol, cancell
 function closeConnection(connection) {
   if (!connection?.client) return;
   if (connection.protocol === 'sftp') {
-    Promise.resolve(connection.client.end()).catch(() => {});
+    Promise.resolve(connection.client.end()).catch(() => { });
   } else if (connection.protocol === 'ftps') {
     connection.client.close();
   }
@@ -567,8 +567,7 @@ app.post('/api/targets/:id/connect', async (req, res) => {
         closeConnection(pendingConnection);
         return sendConnectResponse(200, { ok: false, connected: false, cancelled: true, error: 'Connection cancelled' });
       }
-      activeConnections.set(id, { client, protocol: 'sftp' });
-      sendConnectResponse(200, { ok: true, connected: true });
+      activeConnections.set(id, { client, protocol: 'sftp', remoteRoot: target.remoteRoot || '/' });
 
     } else if (target.protocol === 'ftps') {
       const ftp = (await import('basic-ftp')).default;
@@ -600,12 +599,9 @@ app.post('/api/targets/:id/connect', async (req, res) => {
 
       await client.access(accessOptions);
 
-      pendingConnections.delete(id);
-      if (pendingConnection.cancelled) {
-        closeConnection(pendingConnection);
-        return sendConnectResponse(200, { ok: false, connected: false, cancelled: true, error: 'Connection cancelled' });
-      }
-      activeConnections.set(id, { client, protocol: 'ftps' });
+      const remoteRoot = target.remoteRoot || '/';
+      await client.ensureDir(remoteRoot);
+      activeConnections.set(id, { client, protocol: 'ftps', remoteRoot });
       sendConnectResponse(200, { ok: true, connected: true });
 
     } else {
@@ -697,9 +693,12 @@ app.get('/api/targets/:id/browse', async (req, res) => {
       }
     } else if (connection.protocol === 'ftps') {
       try {
-        const basePath = remotePath || '/';
+        const remoteRoot = connection.remoteRoot || '/';
+        const currentDir = await connection.client.pwd();
+        const basePath = remotePath || remoteRoot;
         await connection.client.cd(basePath);
         const list = await connection.client.list();
+        await connection.client.cd(currentDir);
 
         items = list.map(item => ({
           name: item.name,
@@ -753,17 +752,24 @@ app.get('/api/targets/:id/download', async (req, res) => {
       const tempPath = path.join('/tmp', `download_${Date.now()}_${path.basename(filePath)}`);
 
       try {
+        const dir = path.posix.dirname(filePath);
+        const filename = path.posix.basename(filePath);
+        const currentDir = await connection.client.pwd();
+        await connection.client.cd(dir);
+
         // Use a Promise wrapper for the FTP download operation
         await new Promise((resolve, reject) => {
-          connection.client.downloadTo(tempPath, filePath)
+          connection.client.downloadTo(tempPath, filename)
             .then(resolve)
             .catch(reject);
         });
 
+        await connection.client.cd(currentDir); // cd back
+
         const buffer = await fs.readFile(tempPath);
 
-        const filename = path.basename(filePath);
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        const filename_response = path.basename(filePath);
+        res.setHeader('Content-Disposition', `attachment; filename="${filename_response}"`);
         res.setHeader('Content-Type', 'application/octet-stream');
         res.send(buffer);
       } catch (ftpError) {
@@ -804,14 +810,15 @@ app.post('/api/targets/:id/upload', async (req, res) => {
   try {
     if (connection.protocol === 'sftp') {
       try {
-        // Create directory if it doesn't exist
         const dir = path.posix.dirname(filePath);
-        if (dir && dir !== '/') {
-          await connection.client.mkdir(dir, true); // recursive directory creation
-        }
+        const filename = path.posix.basename(filePath);
+        const currentDir = await connection.client.pwd();
+        await connection.client.ensureDir(dir);
 
         const buffer = Buffer.from(content, 'utf8');
-        await connection.client.put(buffer, filePath);
+        await connection.client.put(buffer, filename);
+
+        await connection.client.cd(currentDir); // cd back
         res.json({ ok: true });
       } catch (sftpError) {
         console.error('SFTP upload error:', sftpError);
